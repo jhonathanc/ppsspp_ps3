@@ -836,10 +836,18 @@ static void PPGeResetCurrentText() {
 	char_lines_metrics = zeroBox;
 }
 
+static bool PPGeUseTextureWindow() {
+	bool softwareRendering = g_Config.bSoftwareRendering;
+#if defined(__PS3__)
+	softwareRendering = softwareRendering || PSP_CoreParameter().gpuCore == GPUCORE_SOFTWARE;
+#endif
+	return softwareRendering && (atlasWidth > 512 || atlasHeight > 512);
+}
+
 // Draws some text using the one font we have in the atlas.
 void PPGeDrawCurrentText(u32 color) {
 	// If the atlas is larger than 512x512, need to use windows into it.
-	bool useTextureWindow = g_Config.bSoftwareRendering && (atlasWidth > 512 || atlasHeight > 512);
+	bool useTextureWindow = PPGeUseTextureWindow();
 	uint32_t texturePosX = 0;
 	uint32_t texturePosY = 0;
 
@@ -1201,7 +1209,7 @@ void PPGeDrawTextWrapped(std::string_view text, float x, float y, float wrapWidt
 // window into it, the same way PPGeDrawCurrentText does for text.
 struct PPGeAtlasWindow {
 	explicit PPGeAtlasWindow(const AtlasImage *img) {
-		if (!img || !dlPtr || !(g_Config.bSoftwareRendering && (atlasWidth > 512 || atlasHeight > 512)))
+		if (!img || !dlPtr || !PPGeUseTextureWindow())
 			return;
 		const float px1 = img->u1 * atlasWidth, py1 = img->v1 * atlasHeight;
 		const float px2 = img->u2 * atlasWidth, py2 = img->v2 * atlasHeight;
