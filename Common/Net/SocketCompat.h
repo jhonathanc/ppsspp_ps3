@@ -10,6 +10,16 @@
 #include <io.h>
 #include <winsock2.h>
 #include <WS2tcpip.h>
+#elif defined(__PSL1GHT__)
+#include <unistd.h>
+#include <sys/types.h>
+#include <net/socket.h>
+#include <net/net.h>
+#include <net/select.h>
+#include <net/poll.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <netdb.h>
 #else
 #include <unistd.h>
 #include <sys/types.h>
@@ -29,6 +39,25 @@
 #endif
 #include <fcntl.h>
 #include <errno.h>
+
+#if defined(__PSL1GHT__)
+#include "Common/Net/SocketSelectPS3.h"
+#include "Common/Net/SocketSendPS3.h"
+#define sendmsg PS3SocketSendMsg
+#undef fd_set
+#undef FD_ZERO
+#undef FD_SET
+#undef FD_CLR
+#undef FD_ISSET
+#undef FD_SETSIZE
+#define fd_set PS3SocketFdSet
+#define FD_ZERO(set) PS3SocketFdZero(set)
+#define FD_SET(fd, set) PS3SocketFdSetBit(fd, set)
+#define FD_CLR(fd, set) PS3SocketFdClear(fd, set)
+#define FD_ISSET(fd, set) PS3SocketFdIsSet(fd, set)
+#define FD_SETSIZE 1024
+#define select PS3SocketSelect
+#endif
 
 #if defined(HAVE_LIBNX) || PPSSPP_PLATFORM(SWITCH)
 #undef __BSD_VISIBLE

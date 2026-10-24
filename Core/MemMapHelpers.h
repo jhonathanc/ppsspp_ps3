@@ -68,6 +68,7 @@ inline void Memcpy(const u32 to_address, const u32 from_address, const u32 len, 
 
 	memcpy(to, from, len);
 
+	GeListWatchWrite(to_address, len, tag ? tag : "Memcpy");
 	if (MemBlockInfoDetailed(len)) {
 		if (!tag) {
 			NotifyMemInfoCopy(to_address, from_address, len, "Memcpy/", 7);

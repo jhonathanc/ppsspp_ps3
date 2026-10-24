@@ -133,6 +133,15 @@ u64 MemoryStick_FreeSpace(std::string gameID) {
 
 	// Assume the memory stick is only used to store savedata, for the current game only.
 	u64 currentUse;
+#if PPSSPP_PLATFORM(PS3)
+	// The PS3 doesn't add up the game's save folders on the HDD: the scan stalled the savedata
+	// thread for tens of seconds to forever (Call of Duty: Roads to Victory froze on its second
+	// boot, when it checks the free space, and again after deleting a save). The simulated card is
+	// far bigger than any PSP game's saves, so "almost all of it free" is the answer games need.
+	if (!flags.MemstickFixedFree) {
+		currentUse = 0;
+	} else
+#endif
 	{
 		std::lock_guard<std::mutex> guard(memstickCurrentUseLock);
 		const uint32_t generation = memstickWriteGeneration;

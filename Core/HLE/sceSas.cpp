@@ -82,6 +82,15 @@ static SasThreadParams sasThreadParams;
 static int sasMixEvent = -1;
 
 static bool g_sasMuteFlag = false;
+// PS3 setting "sasnowait": when the mix isn't done yet at the event, check again a little later
+// (emulated time) instead of stopping the whole emulator until it is: the game's other threads
+// (its renderer) run meanwhile. The SAS thread itself still waits for the finished mix.
+#if PPSSPP_PLATFORM(PS3)
+bool g_sasNoBlock = false;
+#else
+bool g_sasNoBlock = getenv("PPSSPP_SASNOBLOCK") != nullptr;  // Test builds.
+#endif
+static int g_sasRetries = 0;
 
 bool *__SasGetGlobalMuteFlag() {
 	return &g_sasMuteFlag;
@@ -158,6 +167,12 @@ static void sasMixFinish(u64 userdata, int cycleslate) {
 	u64 result = __KernelGetWaitValue(threadID, error);
 
 	if (error == 0 && verify == 1) {
+		if (g_sasNoBlock && sasThreadState == SasThreadState::QUEUED && g_sasRetries < 40) {
+			g_sasRetries++;
+			CoreTiming::ScheduleEvent(usToCycles(50), sasMixEvent, userdata);
+			return;
+		}
+		g_sasRetries = 0;
 		// Wait until it's actually complete before waking the thread.
 		__SasDrain();
 
@@ -436,7 +451,7 @@ static u32 sceSasSetVolume(u32 core, int voiceNum, int leftVol, int rightVol, in
 	bool overVolume = abs(leftVol) > PSP_SAS_VOL_MAX || abs(rightVol) > PSP_SAS_VOL_MAX;
 	overVolume = overVolume || abs(effectLeftVol) > PSP_SAS_VOL_MAX || abs(effectRightVol) > PSP_SAS_VOL_MAX;
 	if (overVolume) {
-		return hleLogWarning(Log::sceSas, SCE_SAS_ERROR_INVALID_VOLUME, "invalid volume");
+		return hleLogDebug(Log::sceSas, SCE_SAS_ERROR_INVALID_VOLUME, "invalid volume");
 	}
 
 	__SasDrain();

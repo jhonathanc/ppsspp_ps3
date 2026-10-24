@@ -1040,6 +1040,7 @@ void IRNativeBackend::FinalizeBlock(int block_num, const JitOptions &jo) {
 				OverwriteExit(blockExit.offset, blockExit.len, dstBlockNum);
 		}
 	}
+	FinalizeBlockDone();
 }
 
 int IRNativeBackend::GetBlockCodeStart(int block_num) const {

@@ -68,6 +68,9 @@
 #include <stdlib.h>
 #include <unistd.h>
 #include <utime.h>
+#if PPSSPP_PLATFORM(PS3)
+#include <sys/syslimits.h>
+#endif
 #endif
 
 #if defined(__DragonFly__) || defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__NetBSD__)
@@ -455,7 +458,11 @@ static int64_t RecursiveSize(const Path &path) {
 	int64_t sizeSum = 0;
 	for (const auto &file : fileInfo) {
 		if (file.isDirectory) {
-			sizeSum += RecursiveSize(file.fullName);
+			// A folder that can't be listed counts as empty, not as -1 bytes (callers add the
+			// result up unsigned: one unreadable folder made the total about 16 EB).
+			const int64_t sub = RecursiveSize(file.fullName);
+			if (sub > 0)
+				sizeSum += sub;
 		} else {
 			sizeSum += file.size;
 		}

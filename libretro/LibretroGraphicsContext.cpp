@@ -1,8 +1,12 @@
 
 #include "libretro/LibretroGraphicsContext.h"
+#if PPSSPP_API(ANY_GL)
 #include "libretro/LibretroGLContext.h"
 #include "libretro/LibretroGLCoreContext.h"
+#endif
+#if !PPSSPP_PLATFORM(PS3) && !defined(PPSSPP_NO_GL)
 #include "libretro/LibretroVulkanContext.h"
+#endif
 #ifdef _WIN32
 #include "libretro/LibretroD3D11Context.h"
 #endif
@@ -102,6 +106,7 @@ LibretroGraphicsContext *LibretroGraphicsContext::CreateGraphicsContext() {
 		preferred = Libretro::backend;
 
    std::string errorMessage;
+#if PPSSPP_API(ANY_GL)
 #ifndef USING_GLES2
 	if (preferred == RETRO_HW_CONTEXT_DUMMY || preferred == RETRO_HW_CONTEXT_OPENGL_CORE) {
 		ctx = new LibretroGLCoreContext();
@@ -125,7 +130,9 @@ LibretroGraphicsContext *LibretroGraphicsContext::CreateGraphicsContext() {
       delete ctx;
 	}
 
-#ifndef HAVE_LIBNX
+#endif
+
+#if !defined(HAVE_LIBNX) && !PPSSPP_PLATFORM(PS3) && !defined(PPSSPP_NO_GL)
 	if (preferred == RETRO_HW_CONTEXT_DUMMY || preferred == RETRO_HW_CONTEXT_VULKAN) {
 		ctx = new LibretroVulkanContext();
 
@@ -166,8 +173,8 @@ std::vector<u32> ConvertFramebufferForLibretro(const GPUDebugBuffer *buffer, u32
 	std::vector<u32> data;
 	data.resize(stride * h, 0);
 
-	const u32 *pixels32 = (const u32 *)buffer->GetData();
-	const u16 *pixels16 = (const u16 *)buffer->GetData();
+	const u32_le *pixels32 = (const u32_le *)buffer->GetData();
+	const u16_le *pixels16 = (const u16_le *)buffer->GetData();
 	int outStride = buffer->GetStride();
 #if 0
 	if (!buffer->GetFlipped()) {
@@ -190,7 +197,8 @@ std::vector<u32> ConvertFramebufferForLibretro(const GPUDebugBuffer *buffer, u32
 			ConvertBGRA8888ToRGBA8888(&dst[y * stride], pixels32, safeW);
 			break;
 		case GPU_DBG_FORMAT_8888_BGRA:
-			memcpy(&dst[y * stride], pixels32, safeW * sizeof(u32));
+			for (u32 x = 0; x < safeW; ++x)
+				dst[y * stride + x] = pixels32[x];
 			break;
 
 		case GPU_DBG_FORMAT_565:

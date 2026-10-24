@@ -339,6 +339,21 @@ std::string StringFromFormat(const char* format, ...) {
 		temp.resize(required);
 	}
 	va_end(args);
+#elif PPSSPP_PLATFORM(PS3)
+	va_start(args, format);
+	va_list measure;
+	va_copy(measure, args);
+	int required = vsnprintf(nullptr, 0, format, measure);
+	va_end(measure);
+	if (required >= 0) {
+		temp.resize(required + 1);
+		if (vsnprintf(&temp[0], temp.size(), format, args) == required) {
+			temp.resize(required);
+		} else {
+			temp.clear();
+		}
+	}
+	va_end(args);
 #else
 	char *buf = nullptr;
 

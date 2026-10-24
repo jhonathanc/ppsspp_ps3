@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include "Common/BitScan.h"
+
 // The GE's own arithmetic, as measured on a PSP (gpu/probe experiments; see unittest/TestGEMath.cpp).
 // float24s are floats with the low 8 mantissa bits clear.
 
@@ -33,6 +35,18 @@
 #include "GPU/Math3D.h"
 
 using namespace Math3D;
+
+// x * 2^n, as ldexpf gives it, but as one multiply when 2^n is a normal float (ldexpf is a library
+// call with several branches; it ran hundreds of thousands of times a second on the PS3).
+inline float GEPow2Mul(float x, int n) {
+	if (n >= -126 && n <= 127) {
+		const uint32_t b = (uint32_t)(n + 127) << 23;
+		float scale;
+		memcpy(&scale, &b, sizeof(scale));
+		return x * scale;
+	}
+	return ldexpf(x, n);
+}
 
 inline float TruncateToFloat24(float f) {
 	uint32_t bits;
@@ -151,7 +165,7 @@ inline float GEAdd(float a, float b) {
 struct GERowTerm {
 	int32_t mantissa;  // The term is mantissa * 2^lsbExp.
 	int lsbExp;
-	float Value() const { return ldexpf((float)mantissa, lsbExp); }
+	float Value() const { return GEPow2Mul((float)mantissa, lsbExp); }
 };
 
 // Zero and denormals (which the GE treats as zero) give a zero term.
@@ -407,6 +421,69 @@ inline Vec4F32 GERecip4(Vec4F32 w, Vec4S32 &bad) {
 	// q * 2^(-16 - e), with w's sign.
 	const Vec4S32 r = Vec4S32FromBits(Vec4F32FromS32(q)) - (Vec4S32::Splat(16) + e).Shl<23>();
 	return Vec4F32FromBits(r | (bits & Vec4S32::Splat((int)0x80000000)));
+}
+
+// The same as GEProduct and GERowSum on float bits, all in integer registers: on the PS3's PPU each
+// float <-> int move goes through memory (a load-hit-store stall of ~40 cycles), and combining the
+// matrices for one draw made ~200 of them (Midnight Club L.A.: ~6 us a draw). Results are identical.
+inline GERowTerm GEProductBits(uint32_t ba, uint32_t bb) {
+	const int ea = (ba >> 23) & 0xFF;
+	const int eb = (bb >> 23) & 0xFF;
+	if (ea == 0 || eb == 0) {
+		return { 0, INT_MIN };
+	}
+	const uint64_t ma = (ba & 0x007FFFFF) | 0x00800000;
+	const uint64_t mb = (bb & 0x007FFFFF) | 0x00800000;
+	const int32_t m = (int32_t)((ma * mb) >> 31);
+	return { ((ba ^ bb) & 0x80000000) ? -m : m, (ea - 127) + (eb - 127) - 15 };
+}
+
+// GERowSum's result as float bits.
+inline uint32_t GERowSumBits(const GERowTerm *terms, int count) {
+	int lsbExp = INT_MIN;
+	for (int i = 0; i < count; ++i) {
+		lsbExp = std::max(lsbExp, terms[i].lsbExp);
+	}
+	int32_t sum = 0;
+	for (int i = 0; i < count; ++i) {
+		const int32_t m = terms[i].mantissa;
+		const int shift = lsbExp - terms[i].lsbExp;
+		if (m != 0 && shift < 32) {
+			sum += m < 0 ? -(-m >> shift) : (m >> shift);
+		}
+	}
+	if (sum == 0) {
+		return 0;
+	}
+	// (float)sum (round to nearest even), then times 2^lsbExp, then truncated to a float24.
+	const uint32_t sign = sum < 0 ? 0x80000000 : 0;
+	uint32_t m = sum < 0 ? 0u - (uint32_t)sum : (uint32_t)sum;
+	int msb = 31 - clz32_nonzero(m);
+	uint32_t mant;
+	if (msb <= 23) {
+		mant = m << (23 - msb);
+	} else {
+		const int drop = msb - 23;
+		mant = m >> drop;
+		const uint32_t rem = m & ((1u << drop) - 1);
+		const uint32_t half = 1u << (drop - 1);
+		if (rem > half || (rem == half && (mant & 1))) {
+			mant++;
+			if (mant == (1u << 24)) {
+				mant >>= 1;
+				msb++;
+			}
+		}
+	}
+	const int e = msb + 127 + lsbExp;
+	if (e >= 1 && e <= 254) {
+		return (sign | ((uint32_t)e << 23) | (mant & 0x007FFFFF)) & 0xFFFFFF00;
+	}
+	// Overflow or a denormal: the float way (rare).
+	float f = TruncateToFloat24(GEPow2Mul((float)sum, lsbExp));
+	uint32_t bits;
+	memcpy(&bits, &f, sizeof(bits));
+	return bits;
 }
 
 float GEAddFloat24(float a, float b);

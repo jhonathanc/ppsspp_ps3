@@ -46,6 +46,8 @@
 #include "Core/HW/MeMMIO.h"
 #include "Core/MIPS/MeCore.h"
 #include "Core/Util/AudioFormat.h"
+#include "Core/HW/SoundDebug.h"
+#include "Common/TimeUtil.h"
 
 // Should be used to lock anything related to the outAudioQueue.
 // atomic locks are used on the lock. TODO: make this lock-free
@@ -84,10 +86,10 @@ static void hleHostAudioUpdate(u64 userdata, int cyclesLate) {
 }
 
 void __AudioCPUMHzChange() {
-	audioIntervalCycles = (int)(usToCycles(1000000ULL) * hwBlockSize / hwSampleRate);
+	audioIntervalCycles = (int)(usToCycles(u64{1000000}) * hwBlockSize / hwSampleRate);
 
 	// Soon to be removed.
-	audioHostIntervalCycles = (int)(usToCycles(1000000ULL) * 512 / hwSampleRate);
+	audioHostIntervalCycles = (int)(usToCycles(u64{1000000}) * 512 / hwSampleRate);
 }
 
 // The mixer's DMA is still playing out the last block it was handed, which had samples in it.
@@ -530,6 +532,17 @@ static bool __AudioMixChannel(AudioChannel &chan) {
 		const s16_le *src = (const s16_le *)Memory::GetPointerUnchecked(chan.sampleAddress);
 		const int leftVol = chan.leftVolume;
 		const int rightVol = chan.rightVolume;
+		if (SoundDebugOn() && chan.index >= 0 && chan.index < 8) {
+			SoundDebugStats::Channel &d = g_soundDebug.ch[chan.index];
+			d.blocks++;
+			d.volL = leftVol;
+			d.volR = rightVol;
+			d.maxVol = std::max(d.maxVol, std::max(leftVol, rightVol));
+			d.mono = mono;
+			const int n = (int)count * (mono ? 1 : 2);
+			SoundDebugScan(src, n, d.inPeak, d.inFull);
+			d.samples += n;
+		}
 		if (mono) {
 			// A mono channel reads the same sample into both sides, which is how the
 			// hardware expands it - there is no separate mono path in the mixer.
@@ -585,7 +598,19 @@ static bool __AudioMixSRC(AudioSRCChannel &chan) {
 		if (!chan.mute && Memory::IsValidRange(addr, stride)) {
 			const s16_le *src = (const s16_le *)Memory::GetPointerUnchecked(addr);
 			const int l0 = src[0];
-			const int r0 = mono ? l0 : src[1];
+			const int r0 = mono ? l0 : (s16)src[1];
+			if (SoundDebugOn()) {
+				SoundDebugStats::Channel &d = g_soundDebug.ch[8];
+				if (out == 0) {
+					d.blocks++;
+					d.volL = leftVol;
+					d.volR = rightVol;
+					d.maxVol = std::max(d.maxVol, std::max(leftVol, rightVol));
+					d.mono = mono;
+				}
+				SoundDebugScan(src, mono ? 1 : 2, d.inPeak, d.inFull);
+				d.samples += mono ? 1 : 2;
+			}
 			int l1 = l0;
 			int r1 = r0;
 			if (resampling) {
@@ -599,7 +624,7 @@ static bool __AudioMixSRC(AudioSRCChannel &chan) {
 				if (nextAddr != 0 && Memory::IsValidRange(nextAddr, stride)) {
 					const s16_le *next = (const s16_le *)Memory::GetPointerUnchecked(nextAddr);
 					l1 = next[0];
-					r1 = mono ? l1 : next[1];
+					r1 = mono ? l1 : (s16)next[1];
 				}
 			}
 			// 15 bits of fraction, not 16 - a full 16 would overflow the product against a
@@ -648,6 +673,20 @@ void __AudioUpdate(bool resetRecording) {
 		MeMMIO::AudioMix(mixBuffer, hwBlockSize);
 	}
 	audioMixing = false;
+
+	if (SoundDebugOn()) {
+		SoundDebugStats &d = g_soundDebug;
+		d.mixBlocks++;
+		for (int i = 0; i < hwBlockSize * 2; i++) {
+			const int64_t v = mixBuffer[i] < 0 ? -(int64_t)mixBuffer[i] : (int64_t)mixBuffer[i];
+			if (v > d.mixPeak) d.mixPeak = v;
+			if (mixBuffer[i] > 32767 || mixBuffer[i] < -32768) d.mixOver++;
+		}
+		d.mixSamples += hwBlockSize * 2;
+		SoundDebugReport(time_now_d());
+	} else {
+		g_soundDebug.start = 0.0;
+	}
 
 	if (g_Config.bEnableSound) {
 		float multiplier = Volume100ToMultiplier(std::clamp(g_Config.iGameVolume, 0, VOLUMEHI_FULL));
@@ -736,4 +775,98 @@ void __StopLogAudio() {
 
 void WAVDump::Reset() {
 	__AudioUpdate(true);
+}
+
+// Sound debug.
+SoundDebugStats g_soundDebug;
+
+static const char *SoundVoiceTypeName(int type) {
+	switch (type) {
+	case 1: return "VAG";
+	case 2: return "noise";
+	case 3: return "triangle";
+	case 4: return "pulse";
+	case 5: return "PCM";
+	case 6: return "ATRAC3";
+	default: return "?";
+	}
+}
+
+static bool SasVoicesOnSpu() {
+#if PPSSPP_ARCH(POWERPC)
+	return !g_sasMixOnPpu;
+#else
+	return false;
+#endif
+}
+
+static std::string SoundPct(int64_t peak) {
+	char buf[32];
+	snprintf(buf, sizeof(buf), "%lld (%d%%)", (long long)peak, (int)(peak * 100 / 32767));
+	return buf;
+}
+
+void SoundDebugReport(double now) {
+	SoundDebugStats &d = g_soundDebug;
+	if (d.start == 0.0) {
+		d = SoundDebugStats();
+		d.start = now;
+		return;
+	}
+	const double secs = now - d.start;
+	// 2 s; host tests with short programs set PPSSPP_SOUNDDEBUG_SECS.
+	static const double interval = getenv("PPSSPP_SOUNDDEBUG_SECS") ? atof(getenv("PPSSPP_SOUNDDEBUG_SECS")) : 2.0;
+	if (secs < interval)
+		return;
+	const bool any = d.mixPeak > 0 || d.sasMixes > 0 || d.atracDecodes > 0;
+	if (any) {
+		std::string line = StringFromFormat("Sound: %.1f s. Final mix (before Volume) peak %s, %u of %u samples over full scale (clipped there)",
+			secs, SoundPct(d.mixPeak).c_str(), d.mixOver, d.mixSamples);
+		for (int i = 0; i < 9; ++i) {
+			const SoundDebugStats::Channel &c = d.ch[i];
+			if (c.blocks == 0)
+				continue;
+			line += StringFromFormat(". %s%s: volume %d/%d (max %d; 32768 = full), game's samples peak %s, %u of %u at full scale",
+				i == 8 ? "SRC channel" : "channel ", i == 8 ? "" : std::to_string(i).c_str(), c.volL, c.volR, c.maxVol,
+				SoundPct(c.inPeak).c_str(), c.inFull, c.samples);
+			if (c.mono) line += " (mono)";
+		}
+		FrontendTrace("%s", line.c_str());
+		if (d.sasMixes > 0) {
+			line = StringFromFormat("Sound: SAS %u mixes (%u with the game's buffer), grain %d, output mode %d, up to %d voices; voices summed peak %s, effect send peak %s",
+				d.sasMixes, d.sasWithInput, d.sasGrain, d.sasOutputMode, d.sasVoicesMax, SoundPct(d.sasDryPeak).c_str(), SoundPct(d.sasWetPeak).c_str());
+			if (d.sasWithInput)
+				line += StringFromFormat(", game's buffer peak %s after its volume %d/%d (4096 = full)", SoundPct(d.sasInPeak).c_str(), d.sasInVolL, d.sasInVolR);
+			line += StringFromFormat(", written peak %s, %u of %u samples clipped; effect type %d dry %s wet %s, effect volume %d/%d; voices mixed on the %s",
+				SoundPct(d.sasOutPeak).c_str(), d.sasClipped, d.sasSamples, d.sasEffectType, d.sasDry ? "on" : "off", d.sasWet ? "on" : "off",
+				d.effectVolL, d.effectVolR, SasVoicesOnSpu() ? "SPU" : "PPU");
+			FrontendTrace("%s", line.c_str());
+			// The loudest voices. A copy: SAS may be mixing on its own thread right now.
+			SoundDebugStats::Voice voices[32];
+			memcpy(voices, d.voice, sizeof(voices));
+			int order[32];
+			int n = 0;
+			for (int v = 0; v < 32; ++v)
+				if (voices[v].mixes) order[n++] = v;
+			std::sort(order, order + n, [&](int a, int b) {
+				const SoundDebugStats::Voice &x = voices[a], &y = voices[b];
+				return (int64_t)std::max(x.volL, x.volR) * (x.env >> 16) > (int64_t)std::max(y.volL, y.volR) * (y.env >> 16);
+			});
+			line = "Sound: SAS voices (loudest first; volume 4096 = full, envelope 100% = full)";
+			for (int i = 0; i < n && i < 8; ++i) {
+				const SoundDebugStats::Voice &v = voices[order[i]];
+				line += StringFromFormat("%s v%d %s volume %d/%d effect %d/%d envelope %d%% pitch %d",
+					i ? ";" : ":", order[i], SoundVoiceTypeName(v.type), v.volL, v.volR, v.effL, v.effR,
+					(int)((int64_t)v.env * 100 / 0x40000000), v.pitch);
+			}
+			if (n > 8) line += StringFromFormat("; %d more", n - 8);
+			FrontendTrace("%s", line.c_str());
+		}
+		if (d.atracDecodes > 0) {
+			FrontendTrace("Sound: ATRAC %u decodes (%d channels), output peak %s, %u of %u samples at full scale",
+				d.atracDecodes, d.atracChannels, SoundPct(d.atracPeak).c_str(), d.atracFull, d.atracSamples);
+		}
+	}
+	d = SoundDebugStats();
+	d.start = now;
 }

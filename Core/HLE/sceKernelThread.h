@@ -211,8 +211,8 @@ public:
 
 	void GetQuickInfo(char *ptr, int size) override {
 		snprintf(ptr, size, "thread=%i, argument= %08x",
-			nc.threadId,
-			nc.commonArgument);
+			(int)nc.threadId,
+			(u32)nc.commonArgument);
 	}
 
 	~PSPCallback() {

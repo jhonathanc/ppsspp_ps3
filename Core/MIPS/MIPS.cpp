@@ -23,6 +23,10 @@
 
 #include "ppsspp_config.h"
 
+#if defined(__PSL1GHT__)
+#include "Common/Math/PowerPCRounding.h"
+#endif
+
 #if PPSSPP_PLATFORM(WINDOWS) && PPSSPP_ARCH(ARM64)
 #include <arm64intr.h>
 #endif
@@ -104,6 +108,8 @@ static u64 g_savedHostMode;
 static u32 g_savedHostMode;
 #endif
 
+int g_flushDenormalsSetting = -1;
+
 void ApplyHostRoundingMode(const MIPSState *mips) {
 	u32 fcr1Bits = mips->fcr31 & 0x01000003;
 	if (!fcr1Bits) {
@@ -149,6 +155,9 @@ void ApplyHostRoundingMode(const MIPSState *mips) {
 #else
 	ARM32WriteFPSCR(mode);
 #endif
+#elif defined(__PSL1GHT__)
+	SetPowerPCRoundingMode(rmode, ftz && HostFlushDenormals());
+	g_hostModeSaved = true;
 #else
 	// No control register access written for this architecture, so go through the standard
 	// call. Rounding is all it can do: there is no portable flush-to-zero, and neither
@@ -169,6 +178,8 @@ void RestoreHostRoundingMode(bool force) {
 			ARM64WriteFPCR(ARM64ReadFPCR() & ~(7 << 22));
 #elif defined(ARM32_FPSCR)
 			ARM32WriteFPSCR(ARM32ReadFPSCR() & ~(7 << 22));
+#elif defined(__PSL1GHT__)
+			SetPowerPCRoundingMode(0);
 #else
 			fesetround(FE_TONEAREST);
 #endif
@@ -182,6 +193,8 @@ void RestoreHostRoundingMode(bool force) {
 	ARM64WriteFPCR(g_savedHostMode);
 #elif defined(ARM32_FPSCR)
 	ARM32WriteFPSCR(g_savedHostMode);
+#elif defined(__PSL1GHT__)
+	SetPowerPCRoundingMode(0);
 #else
 	fesetround(FE_TONEAREST);
 #endif
@@ -331,6 +344,7 @@ void MIPSState::Reset() {
 }
 
 void MIPSState::Init() {
+	RestoreHostRoundingMode();
 	InitRegisters();
 	if (IsMediaEngine()) {
 		// Replacement hooks are only the main CPU's.

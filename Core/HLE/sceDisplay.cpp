@@ -36,6 +36,7 @@
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/Serialize/SerializeMap.h"
 #include "Common/TimeUtil.h"
+#include "Common/FrontendTrace.h"
 #include "Core/Config.h"
 #include "Core/CoreTiming.h"
 #include "Core/CoreParameter.h"
@@ -46,6 +47,7 @@
 #include "Core/HLE/HLE.h"
 #include "Core/HLE/ErrorCodes.h"
 #include "Core/HLE/FunctionWrappers.h"
+#include "GPU/PS3Profile.h"
 #include "Core/HLE/sceDisplay.h"
 #include "Core/HLE/sceKernel.h"
 #include "Core/HLE/sceNet.h"
@@ -124,6 +126,58 @@ static double curFrameTime;
 static double lastFrameTime;
 static double nextFrameTime;
 static int numVBlanksSinceFlip;
+// PS3 frontend "fpscap": the game gets to set a new frame no sooner than this many vblanks after
+// the last one (2: 30 frames a second). Games that would run their logic at 60 frames a second do
+// half the work; they see each frame take two vblanks, as on a PSP that can't keep up. Whatever
+// way the game paces itself: a vblank wait after a new frame lasts until the frame's vblanks are
+// up, and a game that sets frames without waiting for a vblank is held in sceDisplaySetFrameBuf.
+int g_displayMinVblanksPerFlip = 1;
+DisplayCapStats g_displayCapStats;
+// Frame cap off while a video plays (__DisplayNoteVideoFrame): until this vcount.
+static int capVideoUntilVCount = -1;
+// The cap comes back during a video that runs below full speed while the game makes far more frames
+// than the video has pictures (build 215: Silent Hill Origins' menu draws at 60 over a 30 fps movie;
+// with no cap that was twice the work of its 30 fps gameplay, ~85% speed, crackling music). Counted
+// over each second of vblanks while a video plays.
+static bool videoCapOn = false;
+// PS3 frontend "videocap": the frame cap while a video plays, in frames a second: 60 none (the
+// default), 40 or 30 for the whole video, or -1 Auto: the normal frame cap, brought back only once
+// the video runs below full speed with the game making far more frames than the video has pictures
+// (Silent Hill Origins' menu draws at 60 over a 30 fps movie). Auto goes again for the rest of the
+// video once the game makes fewer than 1.2 frames per picture: at 30 that menu decoded fewer than
+// its movie's 30 pictures, the movie's buffer filled with video, its sound ran dry and the game held
+// the picture until the sound caught up, often for many seconds (build 222).
+int g_displayVideoCapFps = 60;
+static bool videoCapReleased = false;
+// With a video cap on: the video's clock fell behind emulated time (the game is decoding fewer
+// pictures than the video has), so the cap is lifted until it keeps up again. At 30 the game has no
+// frame to spare for a 30 fps video: one slow frame and it falls behind, and the movie gets stuck as
+// above. Measured from the pictures' timestamps over each second of vblanks.
+static bool videoCatchUp = false;
+static s64 videoWinStartPts = -1, videoLastPts = -1;
+static int videoCatchUpLogs = 0;
+static int videoWinVblanks, videoWinFlips, videoWinPictures;
+static double videoWinStart;
+static u32 videoLastTopaddr;
+
+// The cap that applies now, in half vblanks per frame: 2 is none (60), 3 is 40, 4 is 30, 6 is 20.
+static int CapPeriodX2() {
+	if (__DisplayVideoPlaying()) {
+		if (videoCatchUp)
+			return 2;
+		if (g_displayVideoCapFps < 0)
+			return videoCapOn ? g_displayMinVblanksPerFlip * 2 : 2;
+		return g_displayVideoCapFps < 60 ? 120 / g_displayVideoCapFps : 2;
+	}
+	return g_displayMinVblanksPerFlip * 2;
+}
+// The vcount (in half vblanks) from which the game's next frame may be shown: frames are paced to
+// whole vblanks, so 40 a second alternates one and two.
+static int capNextX2;
+static bool capWaitedSinceFrame;    // A vblank wait since then.
+static u64 capNextFrameTicks;       // No-wait games: the earliest time for the next frame.
+static u32 capLastTopaddr;
+static SceUID capFrameThread;      // The thread that set it (other threads' vblank waits aren't held).
 // Host timestamp of the last flip we let through, for the fast-forward flip limiter in
 // __DisplayFlip. Up here with the rest of them so a boot resets it - as a static inside the
 // function it kept a timestamp from whatever ran before, and the first flip of a new game was
@@ -193,6 +247,13 @@ static void ScheduleLagSync(int over = 0) {
 
 void __DisplayInit() {
 	__DisplaySetFramerate();
+	capVideoUntilVCount = -1;
+	videoCapOn = false;
+	videoCapReleased = false;
+	videoCatchUp = false;
+	videoWinStartPts = videoLastPts = -1;
+	videoWinVblanks = videoWinFlips = videoWinPictures = 0;
+	videoWinStart = 0.0;
 	hasSetMode = false;
 	mode = 0;
 	resumeMode = 0;
@@ -204,6 +265,11 @@ void __DisplayInit() {
 	numVBlanksSinceFlip = 0;
 	flippedThisFrame = false;
 	framebufIsLatched = false;
+	capNextX2 = -2000;
+	capWaitedSinceFrame = true;
+	capNextFrameTicks = 0;
+	capLastTopaddr = 0;
+	capFrameThread = 0;
 	framebuf.topaddr = 0x04000000;
 	framebuf.fmt = GE_FORMAT_8888;
 	framebuf.stride = 512;
@@ -305,6 +371,8 @@ void __DisplayDoState(PointerWrap &p) {
 		ScheduleLagSync();
 	}
 
+	if (gpu)
+		gpu->AsyncWait();
 	Do(p, gstate);
 
 	// TODO: GPU stuff is really not the responsibility of sceDisplay.
@@ -486,7 +554,16 @@ static void DoFrameTiming(bool throttle, bool *skipFrame, float scaledTimestep, 
 	if (autoFrameSkip) {
 		// autoframeskip
 		// Argh, we are falling behind! Let's skip a frame and see if we catch up.
-		if (curFrameTime > nextFrameTime && doFrameSkip) {
+#if PPSSPP_PLATFORM(PS3)
+		// Only once behind by more than a frame. Skipping as soon as we were a little behind meant
+		// a game slightly over its frame time (Silent Hill Origins: 35 ms for a 33 ms frame) skipped
+		// every other frame, then waited ~10 ms per drawn frame for real time to catch up: 15 fps
+		// instead of the ~26 that skipping one frame in several gives at the same speed.
+		const double skipSlack = scaledTimestep;
+#else
+		const double skipSlack = 0.0;
+#endif
+		if (curFrameTime > nextFrameTime + skipSlack && doFrameSkip) {
 			*skipFrame = true;
 		}
 	} else {
@@ -546,6 +623,7 @@ static void DoFrameIdleTiming() {
 	// Give a little extra wiggle room in case the next vblank does more work.
 	const double goal = lastFrameTime + (numVBlanksSinceFlip - 1) * scaledVblank - 0.001;
 	if (numVBlanksSinceFlip >= 2 && before < goal) {
+		PS3_PROFILE(realTimeWait);
 		double cur_time;
 		while ((cur_time = time_now_d()) < goal) {
 #ifdef _WIN32
@@ -565,6 +643,43 @@ static void DoFrameIdleTiming() {
 }
 
 void hleEnterVblank(u64 userdata, int cyclesLate) {
+	if (__DisplayVideoPlaying()) {
+		void MpegStatsVblank();
+		MpegStatsVblank();
+		if (++videoWinVblanks >= 60) {
+			const double now = time_now_d();
+			const double real = now - videoWinStart;
+			// A second of vblanks that took over 3 s was a pause (the PS button menu), not slowness.
+			if (!videoCapOn && !videoCapReleased && g_displayVideoCapFps < 0 && g_displayMinVblanksPerFlip > 1 && real > 0.0 && real < 3.0 &&
+				1.0 / real < 0.95 && videoWinFlips * 10 > videoWinPictures * 14) {
+				videoCapOn = true;
+				FrontendTrace("Video: %d frames for %d pictures at %.0f%% speed: frame cap back on for this video", videoWinFlips, videoWinPictures, 100.0 / real);
+			} else if (videoCapOn && real > 0.0 && real < 3.0 && videoWinPictures > 0 && videoWinFlips * 10 < videoWinPictures * 12) {
+				// Not keeping ahead of the video under the cap: it would fall behind (see above).
+				videoCapOn = false;
+				videoCapReleased = true;
+				FrontendTrace("Video: only %d frames for %d pictures with the frame cap: off again for this video", videoWinFlips, videoWinPictures);
+			}
+			// The video's clock over this second (timestamps in 90 kHz units); a restart or a jump
+			// back (a loop) doesn't count.
+			const bool capOn = g_displayVideoCapFps < 0 ? videoCapOn : g_displayVideoCapFps < 60;
+			if (videoWinStartPts >= 0 && videoLastPts >= videoWinStartPts && real > 0.0 && real < 3.0) {
+				const double moved = (videoLastPts - videoWinStartPts) / 90000.0;
+				if (!videoCatchUp && capOn && moved < 0.93) {
+					videoCatchUp = true;
+					if (videoCatchUpLogs < 16) {
+						videoCatchUpLogs++;
+						FrontendTrace("Video: %.2f s of video in a second with the frame cap: cap lifted until it catches up", moved);
+					}
+				} else if (videoCatchUp && moved >= 1.0) {
+					videoCatchUp = false;
+				}
+			}
+			videoWinStartPts = videoLastPts;
+			videoWinVblanks = videoWinFlips = videoWinPictures = 0;
+			videoWinStart = now;
+		}
+	}
 	int vbCount = userdata;
 
 	VERBOSE_LOG(Log::sceDisplay, "Enter VBlank %i", vbCount);
@@ -750,6 +865,8 @@ void __DisplayFlip(int cyclesLate) {
 		skipFrame = false;
 	}
 
+	// The GE list thread (PS3 setting) reads the skip flag: not while it runs.
+	gpu->AsyncWait();
 	if (skipFrame) {
 		// Tell the emulated GPU to skip the next frame.
 		gstate_c.skipDrawReason |= SKIPDRAW_SKIPFRAME;
@@ -862,6 +979,29 @@ void hleLagSync(u64 userdata, int cyclesLate) {
 	}
 }
 
+// A video picture was just written (sceMpeg, scePsmfPlayer). Video players step once per vblank
+// and show whichever picture is due: held to every other vblank by the frame cap, a 30 fps video
+// lost pictures to the slightest lateness (Call of Duty: Roads to Victory's intro showed ~15 of
+// its 30 a second). No cap while one plays, and for half a second after.
+void __DisplayNoteVideoFrame(s64 videoPts) {
+	if (!__DisplayVideoPlaying()) {
+		// A new video: no cap again until it shows it needs one.
+		videoCapOn = false;
+		videoCapReleased = false;
+		videoCatchUp = false;
+		videoWinStartPts = videoPts;
+		videoWinVblanks = videoWinFlips = videoWinPictures = 0;
+		videoWinStart = time_now_d();
+	}
+	videoWinPictures++;
+	videoLastPts = videoPts;
+	capVideoUntilVCount = (int)__DisplayGetVCount() + 30;
+}
+
+bool __DisplayVideoPlaying() {
+	return capVideoUntilVCount >= 0 && (int)__DisplayGetVCount() <= capVideoUntilVCount;
+}
+
 static u32 sceDisplayIsVblank() {
 	return hleLogDebug(Log::sceDisplay, DisplayIsVblank());
 }
@@ -873,6 +1013,16 @@ void __DisplayWaitForVblanks(const char *reason, int vblanks, bool callbacks) {
 	// threads were waiting there was nothing left to schedule.
 	if (__IsInInterrupt() || !__KernelIsDispatchEnabled()) {
 		return;
+	}
+
+	// Frame cap: the wait after a new frame lasts until that frame's vblanks are up.
+	if (CapPeriodX2() > 2 && __KernelGetCurThread() == capFrameThread) {
+		capWaitedSinceFrame = true;
+		const int needed = (capNextX2 + 1) / 2 - (int)__DisplayGetVCount();
+		if (needed > vblanks) {
+			vblanks = needed;
+			g_displayCapStats.waitsExtended++;
+		}
 	}
 
 	const s64 ticksIntoFrame = CoreTiming::GetTicks(currentMIPS) - DisplayFrameStartTicks();
@@ -1001,6 +1151,34 @@ int sceDisplaySetFramebuf(MIPSState *mips, u32 topaddr, int linesize, int pixelf
 		lastFlipCycles = now;
 		nextFlipCycles = std::max(lastFlipCycles, nextFlipCycles) + expected;
 	}
+
+	// Frame cap (see g_displayMinVblanksPerFlip): a new frame from a game that didn't wait for a
+	// vblank since its last one is held back until its time. (Frontend 68 also held Killzone,
+	// which shows every frame at the same address; its game logic moves one step per frame, so
+	// it ran in slow motion. Back to how 67 did it: Killzone isn't held.)
+	if (__DisplayVideoPlaying() && topaddr != 0 && topaddr != videoLastTopaddr) {
+		videoWinFlips++;
+		videoLastTopaddr = topaddr;
+	}
+	const int capPeriodX2 = CapPeriodX2();
+	if (capPeriodX2 > 2 && topaddr != 0 && topaddr != capLastTopaddr) {
+		const u64 now = CoreTiming::GetTicks(currentMIPS);
+		const s64 period = msToCycles(1001) * capPeriodX2 / 120;
+		g_displayCapStats.frames++;
+		if (__IsInInterrupt())
+			g_displayCapStats.inInterrupt++;
+		if (!capWaitedSinceFrame && capNextFrameTicks > now && delayCycles == 0) {
+			delayCycles = (s64)(capNextFrameTicks - now);
+			g_displayCapStats.held++;
+			g_displayCapStats.heldUs += cyclesToUs(delayCycles);
+		}
+		capNextFrameTicks = now + delayCycles + period - usToCycles(500);
+		capNextX2 = std::max(capNextX2, (int)__DisplayGetVCount() * 2) + capPeriodX2;
+		capFrameThread = __KernelGetCurThread();
+		capWaitedSinceFrame = false;
+	}
+	if (topaddr != 0)
+		capLastTopaddr = topaddr;
 
 	__DisplaySetFramebuf(topaddr, linesize, pixelformat, sync);
 

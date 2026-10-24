@@ -20,6 +20,7 @@
 #include "ext/xxhash.h"
 
 #include "Common/Common.h"
+#include "Common/Swap.h"
 #include "Common/Log.h"
 #include "Common/Math/SIMDHeaders.h"
 
@@ -259,6 +260,42 @@ u32 GetTextureBufw(int level, u32 texaddr, GETextureFormat format) {
 
 // Matches QuickTexHashNEON/SSE, see #7029.
 static u32 QuickTexHashNonSSE(const void *checkp, u32 size) {
+#if COMMON_BIG_ENDIAN
+	// Match the little-endian halfword/word overlap used by the SIMD hashes.
+	u32 check = 0;
+	if (((intptr_t)checkp & 0xf) == 0 && (size & 0x3f) == 0) {
+		u16 cursor[8]{};
+		u16 cursor2[8] = { 0xc00bU, 0x9bd9U, 0x4b73U, 0xb651U, 0x4d9bU, 0x4309U, 0x0083U, 0x0001U };
+		const u8 *p = (const u8 *)checkp;
+		for (u32 i = 0; i < size; i += 64) {
+			for (u32 j = 0; j < 8; ++j) {
+				cursor[j] += (u32)((const u16_le *)(p + i))[j] * cursor2[j];
+			}
+			for (u32 j = 0; j < 4; ++j) {
+				u32 word = cursor[j * 2] | ((u32)cursor[j * 2 + 1] << 16);
+				word ^= ((const u32_le *)(p + i + 16))[j];
+				word += ((const u32_le *)(p + i + 32))[j];
+				cursor[j * 2] = (u16)word;
+				cursor[j * 2 + 1] = (u16)(word >> 16);
+			}
+			for (u32 j = 0; j < 8; ++j) {
+				cursor[j] ^= (u32)((const u16_le *)(p + i + 48))[j] * cursor2[j];
+				cursor2[j] += 0x2455;
+			}
+		}
+		for (u32 j = 0; j < 4; ++j) {
+			check += cursor[j * 2] | ((u32)cursor[j * 2 + 1] << 16);
+			check += cursor2[j * 2] | ((u32)cursor2[j * 2 + 1] << 16);
+		}
+	} else {
+		const u32_le *p = (const u32_le *)checkp;
+		for (u32 i = 0; i < size / 8; ++i) {
+			check += *p++;
+			check ^= *p++;
+		}
+	}
+	return check;
+#else
 	u32 check = 0;
 
 	if (((intptr_t)checkp & 0xf) == 0 && (size & 0x3f) == 0) {
@@ -312,6 +349,7 @@ static u32 QuickTexHashNonSSE(const void *checkp, u32 size) {
 	}
 
 	return check;
+#endif
 }
 
 u32 StableQuickTexHash(const void *checkp, u32 size) {

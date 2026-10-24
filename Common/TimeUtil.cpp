@@ -33,6 +33,9 @@
 
 #include <chrono>
 #include <ctime>
+#if PPSSPP_PLATFORM(PS3)
+#include "PS3/SDK/PS3SDK.h"
+#endif
 
 // TODO: https://github.com/floooh/sokol/blob/9a6237fcdf213e6da48e4f9201f144bcb2dcb46f/sokol_time.h#L229-L248
 
@@ -149,7 +152,9 @@ int64_t Instant::ElapsedNanos() const {
 
 // Monotonic, in nanoseconds, and the clock VK_GOOGLE_display_timing reports in.
 uint64_t time_now_raw() {
-#if PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
+#if PPSSPP_PLATFORM(PS3)
+	return static_cast<uint64_t>(PS3SDKSystemTime()) * 1000;
+#elif PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
 	// mach_absolute_time() in nanoseconds, which is what MoltenVK reports present times in. Apple's
 	// CLOCK_MONOTONIC keeps counting during sleep (unlike Linux's), so it drifts away from those,
 	// and is slower to read (~30ns vs ~19ns on M1).
@@ -165,7 +170,11 @@ uint64_t time_now_raw() {
 }
 
 double time_now_unix_utc() {
-#if PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(LINUX) || PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
+#if PPSSPP_PLATFORM(PS3)
+	struct timeval tv;
+	gettimeofday(&tv, nullptr);
+	return static_cast<double>(tv.tv_sec) + tv.tv_usec / 1000000.0;
+#elif PPSSPP_PLATFORM(ANDROID) || PPSSPP_PLATFORM(LINUX) || PPSSPP_PLATFORM(MAC) || PPSSPP_PLATFORM(IOS)
 	struct timespec tp;
 	clock_gettime(CLOCK_REALTIME, &tp);
 	return (double)tp.tv_sec + (double)tp.tv_nsec / 1000000000.0;
@@ -209,7 +218,9 @@ double time_to_unix_utc(double timestamp) {
 }
 
 void yield() {
-#if PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
+#if PPSSPP_PLATFORM(PS3)
+	PS3SDKYield();
+#elif PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64)
 	_mm_pause();
 #elif PPSSPP_ARCH(ARM64)
 	// Took this out for now. See issue #17877
@@ -331,6 +342,12 @@ void GetCurrentTimeFormatted(char formattedTime[13]) {
 	SYSTEMTIME st;
 	GetLocalTime(&st);
 	snprintf(formattedTime, 13, "%02d:%02d:%03d", st.wMinute, st.wSecond, st.wMilliseconds);
+#elif PPSSPP_PLATFORM(PS3)
+	struct timeval tv;
+	gettimeofday(&tv, nullptr);
+	struct tm tm;
+	localtime_r(&tv.tv_sec, &tm);
+	snprintf(formattedTime, 13, "%02d:%02d:%03d", tm.tm_min, tm.tm_sec, (int)(tv.tv_usec / 1000));
 #else
 	struct timespec ts;
 	clock_gettime(CLOCK_REALTIME, &ts);

@@ -71,11 +71,11 @@ void __UpdateMatchingHandler(const MatchingArgs &ArgsPtr) {
 // Matching callback is void function: typedef void(*SceNetAdhocMatchingHandler)(int id, int event, SceNetEtherAddr * peer, int optlen, void * opt);
 // Important! The MIPS call need to be fully executed before the next MIPS call invoked, as the game (ie. DBZ Tag Team) may need to prepare something for the next callback event to use
 // Note: Must not lock peerlock within this function to prevent race-condition with other thread whos owning peerlock and trying to lock context->eventlock owned by this thread
-void notifyMatchingHandler(SceNetAdhocMatchingContext * context, ThreadMessage * msg, void * opt, u32_le &bufAddr, u32_le &bufLen, u32_le * args) {
+void notifyMatchingHandler(SceNetAdhocMatchingContext * context, ThreadMessage * msg, void * opt, u32 &bufAddr, u32 &bufLen, u32_le * args) {
 	// Don't share buffer address space with other mipscall in the queue since mipscalls aren't immediately executed
 	MatchingArgs argsNew = { 0 };
-	u32_le dataBufLen = msg->optlen + 8; //max(bufLen, msg->optlen + 8);
-	u32_le dataBufAddr = userMemory.Alloc(dataBufLen); // We will free this memory after returning from mipscall. FIXME: Are these buffers supposed to be taken/pre-allocated from the memory pool during sceNetAdhocMatchingInit?
+	u32 dataBufLen = static_cast<u32>(msg->optlen) + 8; //max(bufLen, msg->optlen + 8);
+	u32 dataBufAddr = userMemory.Alloc(dataBufLen); // We will free this memory after returning from mipscall. FIXME: Are these buffers supposed to be taken/pre-allocated from the memory pool during sceNetAdhocMatchingInit?
 	uint8_t *dataPtr = Memory::GetPointerWriteRangeOrException(dataBufAddr, dataBufLen);
 	if (dataPtr) {
 		memcpy(dataPtr, &msg->mac, sizeof(msg->mac));
@@ -184,7 +184,7 @@ void broadcastHelloMessage(SceNetAdhocMatchingContext * context) {
 
 	std::string hellohex;
 	DataToHexString(10, 0, context->hello, context->hellolen, &hellohex);
-	DEBUG_LOG(Log::sceNet, "HELLO Dump (%d bytes):\n%s", context->hellolen, hellohex.c_str());
+	DEBUG_LOG(Log::sceNet, "HELLO Dump (%d bytes):\n%s", (int)context->hellolen, hellohex.c_str());
 
 	// Send Broadcast, so everyone know we have a room here
 	peerlock.lock();
@@ -1182,7 +1182,7 @@ int matchingEventThread(int matchingId) {
 					if (msg->optlen > 0) opt = ((u8*)msg) + sizeof(ThreadMessage); //&msg[1]
 
 					// Log Matching Events
-					INFO_LOG(Log::sceNet, "EventLoop[%d]: Matching Event [%d=%s][%s] OptSize=%d", matchingId, msg->opcode, getMatchingEventStr(msg->opcode), mac2str(&msg->mac).c_str(), msg->optlen);
+					INFO_LOG(Log::sceNet, "EventLoop[%d]: Matching Event [%d=%s][%s] OptSize=%d", matchingId, (int)msg->opcode, getMatchingEventStr(msg->opcode), mac2str(&msg->mac).c_str(), (int)msg->optlen);
 
 					// Unlock to prevent race-condition with other threads due to recursive lock
 					//context->eventlock->unlock();
@@ -1231,7 +1231,7 @@ int matchingEventThread(int matchingId) {
 				// Grab Optional Data
 				if (msg->optlen > 0) opt = ((u8 *)msg) + sizeof(ThreadMessage); //&msg[1]
 
-				INFO_LOG(Log::sceNet, "EventLoop[%d]: Matching Event [EVENT=%d]\n", matchingId, msg->opcode);
+				INFO_LOG(Log::sceNet, "EventLoop[%d]: Matching Event [EVENT=%d]\n", matchingId, (int)msg->opcode);
 
 				//context->eventlock->unlock();
 				// Original Call Event Handler
@@ -1289,8 +1289,8 @@ int matchingInputThread(int matchingId) { // TODO: The MatchingInput thread is u
 	u64_le now;
 
 	static SceNetEtherAddr sendermac;
-	static u32_le senderport;
-	static int rxbuflen;
+	static u16_le senderport;
+	static s32_le rxbuflen;
 
 	// Log Startup
 	INFO_LOG(Log::sceNet, "InputLoop: Begin of InputLoop[%i] Thread", matchingId);
@@ -1404,7 +1404,7 @@ int matchingInputThread(int matchingId) { // TODO: The MatchingInput thread is u
 				if (recvresult == 0 && rxbuflen > 0) {
 					// Log Receive Success
 					if (context->rxbuf[0] > 1) {
-						INFO_LOG(Log::sceNet, "InputLoop[%d]: Received %d Bytes (Opcode[%d]=%s)", matchingId, rxbuflen, context->rxbuf[0], getMatchingOpcodeStr(context->rxbuf[0]));
+						INFO_LOG(Log::sceNet, "InputLoop[%d]: Received %d Bytes (Opcode[%d]=%s)", matchingId, (int)rxbuflen, context->rxbuf[0], getMatchingOpcodeStr(context->rxbuf[0]));
 					}
 
 					// Update Peer Timestamp
@@ -1413,11 +1413,11 @@ int matchingInputThread(int matchingId) { // TODO: The MatchingInput thread is u
 					if (peer != NULL) {
 						now = CoreTiming::GetGlobalTimeUsScaled();
 						s64 delta = now - peer->last_recv;
-						DEBUG_LOG(Log::sceNet, "Timestamp LastRecv Delta: %lld (%llu - %llu) from %s", delta, now, peer->last_recv, mac2str(&sendermac).c_str());
-						if (peer->last_recv != 0) peer->last_recv = std::max(peer->last_recv, now - defaultLastRecvDelta);
+						DEBUG_LOG(Log::sceNet, "Timestamp LastRecv Delta: %lld (%llu - %llu) from %s", delta, (long long unsigned int)now, (long long unsigned int)peer->last_recv, mac2str(&sendermac).c_str());
+						if (peer->last_recv != 0) peer->last_recv = std::max(static_cast<u64>(peer->last_recv), now - defaultLastRecvDelta);
 					}
 					else {
-						WARN_LOG(Log::sceNet, "InputLoop[%d]: Unknown Peer[%s:%u] (Recved=%i, Length=%i)", matchingId, mac2str(&sendermac).c_str(), senderport, recvresult, rxbuflen);
+						WARN_LOG(Log::sceNet, "InputLoop[%d]: Unknown Peer[%s:%u] (Recved=%i, Length=%i)", matchingId, mac2str(&sendermac).c_str(), (unsigned int)senderport, recvresult, (int)rxbuflen);
 					}
 
 					// Show a warning if other player is having their port being re-mapped, thus that other player may have issue with the communication. 
@@ -1426,7 +1426,7 @@ int matchingInputThread(int matchingId) { // TODO: The MatchingInput thread is u
 						char name[9] = {};
 						if (peer != NULL)
 							truncate_cpy(name, sizeof(name), (const char*)peer->nickname.data);
-						WARN_LOG(Log::sceNet, "InputLoop[%d]: Unknown Source Port from [%s][%s:%u -> %u] (Recved=%i, Length=%i)", matchingId, name, mac2str(&sendermac).c_str(), senderport, context->port, recvresult, rxbuflen);
+						WARN_LOG(Log::sceNet, "InputLoop[%d]: Unknown Source Port from [%s][%s:%u -> %u] (Recved=%i, Length=%i)", matchingId, name, mac2str(&sendermac).c_str(), (unsigned int)senderport, (unsigned int)context->port, recvresult, (int)rxbuflen);
 						g_OSD.Show(OSDType::MESSAGE_WARNING, std::string(n->T("AM: Data from Unknown Port")) + std::string(" [") + std::string(name) + std::string("]:") + std::to_string(senderport) + std::string(" -> ") + std::to_string(context->port) + std::string(" (") + std::to_string(portOffset) + std::string(")"), 0.0f, "unknowndata");
 					}
 					// Keep tracks of re-mapped peer's ports for further communication. 
@@ -2350,7 +2350,7 @@ static int sceNetAdhocMatchingGetMembers(int matchingId, u32 sizeAddr, u32 buf) 
 						// Faking lastping
 						auto friendpeer = findFriend(&p2p->mac);
 						if (p2p->lastping != 0 && friendpeer != NULL && friendpeer->last_recv != 0)
-							p2p->lastping = std::max(p2p->lastping, CoreTiming::GetGlobalTimeUsScaled() - defaultLastRecvDelta);
+							p2p->lastping = std::max(static_cast<u64>(p2p->lastping), CoreTiming::GetGlobalTimeUsScaled() - defaultLastRecvDelta);
 						else
 							p2p->lastping = 0;
 
@@ -2369,7 +2369,7 @@ static int sceNetAdhocMatchingGetMembers(int matchingId, u32 sizeAddr, u32 buf) 
 						// Faking lastping
 						auto friendpeer = findFriend(&parentpeer->mac);
 						if (parentpeer->lastping != 0 && friendpeer != NULL && friendpeer->last_recv != 0)
-							parentpeer->lastping = std::max(parentpeer->lastping, CoreTiming::GetGlobalTimeUsScaled() - defaultLastRecvDelta);
+							parentpeer->lastping = std::max(static_cast<u64>(parentpeer->lastping), CoreTiming::GetGlobalTimeUsScaled() - defaultLastRecvDelta);
 						else
 							parentpeer->lastping = 0;
 
@@ -2390,7 +2390,7 @@ static int sceNetAdhocMatchingGetMembers(int matchingId, u32 sizeAddr, u32 buf) 
 							// Faking lastping
 							auto friendpeer = findFriend(&peer->mac);
 							if (peer->lastping != 0 && friendpeer != NULL && friendpeer->last_recv != 0)
-								peer->lastping = std::max(peer->lastping, CoreTiming::GetGlobalTimeUsScaled() - defaultLastRecvDelta);
+								peer->lastping = std::max(static_cast<u64>(peer->lastping), CoreTiming::GetGlobalTimeUsScaled() - defaultLastRecvDelta);
 							else
 								peer->lastping = 0;
 
@@ -2620,8 +2620,9 @@ void __NetMatchingCallbacks() { //(int matchingId)
 
 	auto params = matchingEvents.begin();
 	if (params != matchingEvents.end()) {
-		u32_le args[6];
-		memcpy(args, params->data, sizeof(args));
+		u32 args[6];
+		for (int i = 0; i < 6; ++i)
+			args[i] = params->data[i];
 		auto context = findMatchingContext(args[0]);
 
 		if (actionAfterMatchingMipsCall < 0) {

@@ -81,6 +81,12 @@ inline size_t FormatMemWriteTagAt(char *buf, size_t sz, const char(&prefix)[Coun
 	return FormatMemWriteTagAt(buf, sz, prefix, Count - 1, start, size);
 }
 
+// PS3: reports emulated writes into display list memory the GE was given (no-op elsewhere).
+void GeListWatchNote(uint32_t listpc, uint32_t stall);
+void GeListWatchStall(uint32_t listpc, uint32_t stall);
+// For writes that don't go through NotifyMemInfo on the PS3 (copies only reported in detail elsewhere).
+void GeListWatchWrite(uint32_t start, uint32_t size, const char *tag);
+
 void MemBlockInfoInit();
 void MemBlockInfoShutdown();
 void MemBlockInfoDoState(PointerWrap &p);
@@ -89,6 +95,13 @@ void MemBlockOverrideDetailed();
 void MemBlockReleaseDetailed();
 bool MemBlockInfoDetailed();
 
+#if PPSSPP_PLATFORM(PS3)
+// No debugger on the PS3, and the record of who wrote which memory grew without bound in games
+// that upload many textures or do many block transfers (Gran Turismo's menus, Call of Duty:
+// main memory went from ~20 MB free to nothing, then the emulator stopped).
+static inline bool MemBlockInfoDetailed(uint32_t size) { return false; }
+static inline bool MemBlockInfoDetailed(uint32_t size1, uint32_t size2) { return false; }
+#else
 static inline bool MemBlockInfoDetailed(uint32_t size) {
 	return size >= MEMINFO_MIN_SIZE || MemBlockInfoDetailed();
 }
@@ -96,6 +109,7 @@ static inline bool MemBlockInfoDetailed(uint32_t size) {
 static inline bool MemBlockInfoDetailed(uint32_t size1, uint32_t size2) {
 	return size1 >= MEMINFO_MIN_SIZE || size2 >= MEMINFO_MIN_SIZE || MemBlockInfoDetailed();
 }
+#endif
 
 class MIPSDebugInterface;
 void DescribeAddress(const MIPSDebugInterface *mips, u32 address, char *buffer, size_t bufferSize);

@@ -15,6 +15,14 @@ InetSocket *SocketManager::CreateSocket(int *index, int *returned_errno, SocketS
 	int hostType = convertSocketTypePSP2Host(type);
 	int hostProtocol = convertSocketProtoPSP2Host(protocol);
 
+#if PPSSPP_PLATFORM(PS3)
+	// Conversion rejects values not exposed by the native SDK.
+	if (hostDomain < 0 || hostType < 0 || hostProtocol < 0) {
+		*returned_errno = hostDomain < 0 ? EAFNOSUPPORT : hostType < 0 ? EOPNOTSUPP : EPROTONOSUPPORT;
+		return nullptr;
+	}
+#endif
+
 	SOCKET hostSock = ::socket(hostDomain, hostType, hostProtocol);
 	if (hostSock < 0) {
 		*returned_errno = socket_errno;

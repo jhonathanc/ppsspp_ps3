@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include "ppsspp_config.h"
 #include <algorithm>  // std::remove
 
 #include "ext/xxhash.h"
@@ -84,7 +85,7 @@ static u8 *g_atlasImageData = nullptr;
 
 static PSPPointer<u16_le> palette;
 constexpr u32 paletteSize = sizeof(u16) * 16;
-static constexpr u16_le paletteData[16] = { 0x0FFF, 0x1FFF, 0x2FFF, 0x3FFF, 0x4FFF, 0x5FFF, 0x6FFF, 0x7FFF, 0x8FFF, 0x9FFF, 0xAFFF, 0xBFFF, 0xCFFF, 0xDFFF, 0xEFFF, 0xFFFF };
+static const u16_le paletteData[16] = { 0x0FFF, 0x1FFF, 0x2FFF, 0x3FFF, 0x4FFF, 0x5FFF, 0x6FFF, 0x7FFF, 0x8FFF, 0x9FFF, 0xAFFF, 0xBFFF, 0xCFFF, 0xDFFF, 0xEFFF, 0xFFFF };
 
 // Vertex collector
 static u32 vertexStart;
@@ -240,7 +241,13 @@ void __PPGeSetupListArgs() {
 void __PPGeInit() {
 	// PPGe isn't really important for headless, and LoadZIM takes a long time (well not that long, but unnecessary).
 	// TODO: Load it lazily.
+#if PPSSPP_PLATFORM(PS3)
+	// The PS3 frontend runs the core through the headless entry point, but its system dialogs
+	// (save prompts) need the font.
+	const bool skipZIM = false;
+#else
 	const bool skipZIM = System_GetPropertyBool(SYSPROP_IS_HEADLESS);
+#endif
 
 	u8 *imageData[12]{};
 	int width[12]{};
@@ -299,7 +306,7 @@ void __PPGeInit() {
 	textDrawer = nullptr;
 	textDrawerImages.clear();
 
-	INFO_LOG(Log::sceGe, "PPGe drawing library initialized. DL: %08x Data: %08x Atlas (%i) Args: %08x", dlPtr, dataPtr, atlasSize, listArgs.ptr);
+	INFO_LOG(Log::sceGe, "PPGe drawing library initialized. DL: %08x Data: %08x Atlas (%i) Args: %08x", dlPtr, dataPtr, atlasSize, (u32)listArgs.ptr);
 }
 
 void __PPGeDoState(PointerWrap &p)
@@ -1189,6 +1196,40 @@ void PPGeDrawTextWrapped(std::string_view text, float x, float y, float wrapWidt
 	PPGeDrawCurrentText(style.color);
 }
 
+// The atlas can be larger than the 512x512 a PSP texture may be (2048x2048 for the current one).
+// Renderers that follow the PSP limits (the software GPU, the PS3 RSX renderer) get a 512x512
+// window into it, the same way PPGeDrawCurrentText does for text.
+struct PPGeAtlasWindow {
+	explicit PPGeAtlasWindow(const AtlasImage *img) {
+		if (!img || !dlPtr || !(g_Config.bSoftwareRendering && (atlasWidth > 512 || atlasHeight > 512)))
+			return;
+		const float px1 = img->u1 * atlasWidth, py1 = img->v1 * atlasHeight;
+		const float px2 = img->u2 * atlasWidth, py2 = img->v2 * atlasHeight;
+		const int wx = ((int)floorf(std::min(px1, px2)) / 256) * 256;
+		const int wy = ((int)floorf(std::min(py1, py2)) / 256) * 256;
+		if (std::max(px1, px2) - wx > 512.0f || std::max(py1, py2) - wy > 512.0f)
+			return;
+		ox = (float)wx;
+		oy = (float)wy;
+		active = true;
+		const uint32_t offset = atlasWidth * wy + wx;
+		WriteCmd(GE_CMD_TEXSIZE0, 9 | (9 << 8));
+		WriteCmd(GE_CMD_TEXADDR0, (PPGE_ATLAS_FAKE_ADDRESS & 0xFFFFF0) + offset / 2);
+		WriteCmd(GE_CMD_TEXBUFWIDTH0, atlasWidth | ((PPGE_ATLAS_FAKE_ADDRESS & 0x0F000000) >> 8));
+		WriteCmd(GE_CMD_TEXFLUSH, 0);
+	}
+	// Texel coordinates (used with tw = th = 1).
+	float U(float u) const { return u * atlasWidth - ox; }
+	float V(float v) const { return v * atlasHeight - oy; }
+	void End() {
+		if (active)
+			PPGeSetDefaultTexture();
+		active = false;
+	}
+	bool active = false;
+	float ox = 0.0f, oy = 0.0f;
+};
+
 // Draws a "4-patch" for button-like things that can be resized
 void PPGeDraw4Patch(ImageID atlasImage, float x, float y, float w, float h, u32 color) {
 	if (!dlPtr)
@@ -1206,29 +1247,31 @@ void PPGeDraw4Patch(ImageID atlasImage, float x, float y, float w, float h, u32 
 	float ymid2 = y + h - bordery;
 	float x2 = x + w;
 	float y2 = y + h;
+	PPGeAtlasWindow aw(img);
 	BeginVertexData();
 	// Top row
-	Vertex(x, y, u1, v1, atlasWidth, atlasHeight, color);
-	Vertex(xmid1, ymid1, uhalf, vhalf, atlasWidth, atlasHeight, color);
-	Vertex(xmid1, y, uhalf, v1, atlasWidth, atlasHeight, color);
-	Vertex(xmid2, ymid1, uhalf, vhalf, atlasWidth, atlasHeight, color);
-	Vertex(xmid2, y, uhalf, v1, atlasWidth, atlasHeight, color);
-	Vertex(x2, ymid1, u2, vhalf, atlasWidth, atlasHeight, color);
+	Vertex(x, y, aw.U(u1), aw.V(v1), 1, 1, color);
+	Vertex(xmid1, ymid1, aw.U(uhalf), aw.V(vhalf), 1, 1, color);
+	Vertex(xmid1, y, aw.U(uhalf), aw.V(v1), 1, 1, color);
+	Vertex(xmid2, ymid1, aw.U(uhalf), aw.V(vhalf), 1, 1, color);
+	Vertex(xmid2, y, aw.U(uhalf), aw.V(v1), 1, 1, color);
+	Vertex(x2, ymid1, aw.U(u2), aw.V(vhalf), 1, 1, color);
 	// Middle row
-	Vertex(x, ymid1, u1, vhalf, atlasWidth, atlasHeight, color);
-	Vertex(xmid1, ymid2, uhalf, vhalf, atlasWidth, atlasHeight, color);
-	Vertex(xmid1, ymid1, uhalf, vhalf, atlasWidth, atlasHeight, color);
-	Vertex(xmid2, ymid2, uhalf, vhalf, atlasWidth, atlasHeight, color);
-	Vertex(xmid2, ymid1, uhalf, vhalf, atlasWidth, atlasHeight, color);
-	Vertex(x2, ymid2, u2, v2, atlasWidth, atlasHeight, color);
+	Vertex(x, ymid1, aw.U(u1), aw.V(vhalf), 1, 1, color);
+	Vertex(xmid1, ymid2, aw.U(uhalf), aw.V(vhalf), 1, 1, color);
+	Vertex(xmid1, ymid1, aw.U(uhalf), aw.V(vhalf), 1, 1, color);
+	Vertex(xmid2, ymid2, aw.U(uhalf), aw.V(vhalf), 1, 1, color);
+	Vertex(xmid2, ymid1, aw.U(uhalf), aw.V(vhalf), 1, 1, color);
+	Vertex(x2, ymid2, aw.U(u2), aw.V(v2), 1, 1, color);
 	// Bottom row
-	Vertex(x, ymid2, u1, vhalf, atlasWidth, atlasHeight, color);
-	Vertex(xmid1, y2, uhalf, v2, atlasWidth, atlasHeight, color);
-	Vertex(xmid1, ymid2, uhalf, vhalf, atlasWidth, atlasHeight, color);
-	Vertex(xmid2, y2, uhalf, v2, atlasWidth, atlasHeight, color);
-	Vertex(xmid2, ymid2, uhalf, vhalf, atlasWidth, atlasHeight, color);
-	Vertex(x2, y2, u2, v2, atlasWidth, atlasHeight, color);
+	Vertex(x, ymid2, aw.U(u1), aw.V(vhalf), 1, 1, color);
+	Vertex(xmid1, y2, aw.U(uhalf), aw.V(v2), 1, 1, color);
+	Vertex(xmid1, ymid2, aw.U(uhalf), aw.V(vhalf), 1, 1, color);
+	Vertex(xmid2, y2, aw.U(uhalf), aw.V(v2), 1, 1, color);
+	Vertex(xmid2, ymid2, aw.U(uhalf), aw.V(vhalf), 1, 1, color);
+	Vertex(x2, y2, aw.U(u2), aw.V(v2), 1, 1, color);
 	EndVertexDataAndDraw(GE_PRIM_RECTANGLES);
+	aw.End();
 }
 
 void PPGeDrawRect(float x1, float y1, float x2, float y2, u32 color) {
@@ -1256,20 +1299,22 @@ void PPGeDrawImage(ImageID atlasImage, float x, float y, const PPGeStyle &style)
 	}
 	float w = img->w;
 	float h = img->h;
+	PPGeAtlasWindow aw(img);
 	BeginVertexData();
 	if (style.hasShadow) {
 		for (float dy = 0.0f; dy <= 2.0f; dy += 1.0f) {
 			for (float dx = 0.0f; dx <= 1.0f; dx += 0.5f) {
 				if (dx == 0.0f && dy == 0.0f)
 					continue;
-				Vertex(x + dx, y + dy, img->u1, img->v1, atlasWidth, atlasHeight, alphaMul(style.shadowColor, 0.35f));
-				Vertex(x + dx + w, y + dy + h, img->u2, img->v2, atlasWidth, atlasHeight, alphaMul(style.shadowColor, 0.35f));
+				Vertex(x + dx, y + dy, aw.U(img->u1), aw.V(img->v1), 1, 1, alphaMul(style.shadowColor, 0.35f));
+				Vertex(x + dx + w, y + dy + h, aw.U(img->u2), aw.V(img->v2), 1, 1, alphaMul(style.shadowColor, 0.35f));
 			}
 		}
 	}
-	Vertex(x, y, img->u1, img->v1, atlasWidth, atlasHeight, style.color);
-	Vertex(x + w, y + h, img->u2, img->v2, atlasWidth, atlasHeight, style.color);
+	Vertex(x, y, aw.U(img->u1), aw.V(img->v1), 1, 1, style.color);
+	Vertex(x + w, y + h, aw.U(img->u2), aw.V(img->v2), 1, 1, style.color);
 	EndVertexDataAndDraw(GE_PRIM_RECTANGLES);
+	aw.End();
 }
 
 void PPGeDrawImage(ImageID atlasImage, float x, float y, float w, float h, const PPGeStyle &style) {
@@ -1280,20 +1325,22 @@ void PPGeDrawImage(ImageID atlasImage, float x, float y, float w, float h, const
 	if (!img) {
 		return;
 	}
+	PPGeAtlasWindow aw(img);
 	BeginVertexData();
 	if (style.hasShadow) {
 		for (float dy = 0.0f; dy <= 2.0f; dy += 1.0f) {
 			for (float dx = 0.0f; dx <= 1.0f; dx += 0.5f) {
 				if (dx == 0.0f && dy == 0.0f)
 					continue;
-				Vertex(x + dx, y + dy, img->u1, img->v1, atlasWidth, atlasHeight, alphaMul(style.shadowColor, 0.35f));
-				Vertex(x + dx + w, y + dy + h, img->u2, img->v2, atlasWidth, atlasHeight, alphaMul(style.shadowColor, 0.35f));
+				Vertex(x + dx, y + dy, aw.U(img->u1), aw.V(img->v1), 1, 1, alphaMul(style.shadowColor, 0.35f));
+				Vertex(x + dx + w, y + dy + h, aw.U(img->u2), aw.V(img->v2), 1, 1, alphaMul(style.shadowColor, 0.35f));
 			}
 		}
 	}
-	Vertex(x, y, img->u1, img->v1, atlasWidth, atlasHeight, style.color);
-	Vertex(x + w, y + h, img->u2, img->v2, atlasWidth, atlasHeight, style.color);
+	Vertex(x, y, aw.U(img->u1), aw.V(img->v1), 1, 1, style.color);
+	Vertex(x + w, y + h, aw.U(img->u2), aw.V(img->v2), 1, 1, style.color);
 	EndVertexDataAndDraw(GE_PRIM_RECTANGLES);
+	aw.End();
 }
 
 void PPGeDrawImage(float x, float y, float w, float h, float u1, float v1, float u2, float v2, int tw, int th, const PPGeImageStyle &style) {

@@ -152,3 +152,9 @@ RAPrefs_PPSSPP.cfg
 cmake-build-*/
 
 /.vscode/
+__pycache__/
+
+# PS3 port
+/PPSSPPHeadless
+*.bundle
+__pycache__/

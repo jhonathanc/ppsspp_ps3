@@ -362,7 +362,7 @@ void Atrac2::DoState(PointerWrap &p) {
 
 	// Both straight from the file: one is dereferenced, the other indexes the two SAS buffers.
 	if (p.mode == p.MODE_READ && (!context_.IsValid() || sas_.curBuffer < 0 || sas_.curBuffer > 1)) {
-		ERROR_LOG(Log::SaveState, "Atrac2: bad context %08x or SAS buffer %d in savestate", context_.ptr, sas_.curBuffer);
+		ERROR_LOG(Log::SaveState, "Atrac2: bad context %08x or SAS buffer %d in savestate", (unsigned int)context_.ptr, sas_.curBuffer);
 		p.SetError(p.ERROR_FAILURE);
 		return;
 	}
@@ -709,7 +709,7 @@ static void ComputeStreamBufferDataInfo(const SceAtracIdInfo &info, u32 *writePt
 	// This really is the core logic of sceAtrac. Initially I had it quite complicated, but boiled it
 	// all down to fairly simple logic. And then boiled it down further and fixed bugs.
 	// And then had to make it WAY complicated again to support looping... Sigh.
-	const u32 streamOff = info.curBuffer != 1 ? info.streamOff : 0;
+	const u32 streamOff = info.curBuffer != 1 ? (s32)info.streamOff : 0;
 	const int spaceUsed = ComputeSpaceUsed(info);
 	const int spaceLeftAfterStreamOff = RoundDownToMultipleWithOffset(streamOff, info.bufferByte, info.sampleSize);
 	const int streamPos = streamOff + spaceUsed;
@@ -901,6 +901,8 @@ u32 Atrac2::DecodeInternal(u32 outbufAddr, int *SamplesNum, int *finish) {
 		context_->codec.err = 0;
 	}
 
+	ConvertAudioSamplesToGuest(outPtr, outSamples * outputChannels_);
+
 	_dbg_assert_(bytesConsumed == info.sampleSize);
 
 	// Advance the file offset.
@@ -1026,10 +1028,10 @@ int Atrac2::SetData(const Track &track, u32 bufferAddr, u32 readSize, u32 buffer
 		"endSample: %d loopStart: %d loopEnd: %d\n"
 		"dataOff: %d curFileOff: %d streamOff: %d streamDataByte: %d\n"
 		"fileDataEnd: %d decodePos: %d numSkipFrames: %d channels: %d",
-		info.sampleSize, info.buffer, info.bufferByte, info.firstValidSample,
-		info.endSample, info.loopStart, info.loopEnd,
-		info.dataOff, info.curFileOff, info.streamOff, info.streamDataByte,
-		info.fileDataEnd, info.decodePos, info.numSkipFrames, info.numChan
+		(int)info.sampleSize, (unsigned int)info.buffer, (int)info.bufferByte, (int)info.firstValidSample,
+		(int)info.endSample, (int)info.loopStart, (int)info.loopEnd,
+		(int)info.dataOff, (int)info.curFileOff, (int)info.streamOff, (int)info.streamDataByte,
+		(int)info.fileDataEnd, (int)info.decodePos, info.numSkipFrames, info.numChan
 	);
 
 	int skipCount = 0;
@@ -1069,7 +1071,7 @@ void Atrac2::WrapLastPacket() {
 		const int copyLen = info.bufferByte - copyStart;
 		// Then, let's copy it.
 		DEBUG_LOG(Log::Atrac, "Packets didn't fit evenly. Last packet got split into %d/%d (sum=%d). Copying to start of buffer.",
-			copyLen, info.sampleSize - copyLen, info.sampleSize);
+			copyLen, info.sampleSize - copyLen, (int)info.sampleSize);
 		Memory::Memcpy(info.buffer, info.buffer + copyStart, copyLen);
 	}
 }
@@ -1165,7 +1167,7 @@ int Atrac2::DecodeLowLevel(const u8 *srcData, int *bytesConsumed, s16 *dstData, 
 	int outSamples = 0;
 	bool success = decoder_->Decode(srcData, info.sampleSize, bytesConsumed, channels, dstData, &outSamples);
 	if (!success) {
-		ERROR_LOG(Log::Atrac, "Low level decoding failed: sampleSize: %d bytesConsumed: %d", info.sampleSize, *bytesConsumed);
+		ERROR_LOG(Log::Atrac, "Low level decoding failed: sampleSize: %d bytesConsumed: %d", (int)info.sampleSize, *bytesConsumed);
 		// We proceed anyway, see issue #20452
 		/*
 		*bytesConsumed = 0;
@@ -1249,7 +1251,7 @@ void Atrac2::DecodeForSas(s16 *dstData, int *bytesWritten, int *finish) {
 		// a large buffer, so also guard against sampleSize exceeding the fixed
 		// assembly buffer here.
 		if ((u32)info.sampleSize > sizeof(assembly)) {
-			ERROR_LOG(Log::Atrac, "SAS packet too large for assembly buffer: %d", info.sampleSize);
+			ERROR_LOG(Log::Atrac, "SAS packet too large for assembly buffer: %d", (int)info.sampleSize);
 			*bytesWritten = 0;
 			*finish = 1;
 			return;
@@ -1300,13 +1302,13 @@ void Atrac2::DecodeForSas(s16 *dstData, int *bytesWritten, int *finish) {
 		if (sas_.fileOffset >= info.fileDataEnd) {
 			// We've reached the end.
 			info.secondBuffer = 0;
-			DEBUG_LOG(Log::Atrac, "%08x >= %08x: Reached the end.", sas_.fileOffset, info.fileDataEnd);
+			DEBUG_LOG(Log::Atrac, "%08x >= %08x: Reached the end.", sas_.fileOffset, (unsigned int)info.fileDataEnd);
 		} else {
 			// Signal to the caller that we accept a new next buffer.
 			info.secondBuffer = 0xFFFFFFFF;
 		}
 
-		DEBUG_LOG(Log::Atrac, "Switching over to buffer %d, updating buffer to %08x, sz: %08x. %s", sas_.curBuffer, info.secondBuffer, info.secondBufferByte, info.secondBuffer == 0xFFFFFFFF ? "Signalling for more data." : "");
+		DEBUG_LOG(Log::Atrac, "Switching over to buffer %d, updating buffer to %08x, sz: %08x. %s", sas_.curBuffer, (unsigned int)info.secondBuffer, (unsigned int)info.secondBufferByte, info.secondBuffer == 0xFFFFFFFF ? "Signalling for more data." : "");
 
 		// Copy the second half (or if part1Size == 0, the whole packet) to the assembly buffer.
 		Memory::Memcpy(assembly + part1Size, sas_.bufPtr[sas_.curBuffer], part2Size);

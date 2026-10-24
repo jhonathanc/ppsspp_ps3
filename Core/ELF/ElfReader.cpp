@@ -191,7 +191,7 @@ bool ElfReader::LoadRelocations(const Elf32_Rel *rels, int numRelocs) {
 
 					// Should have matching index and segment info, according to llvm, which makes sense.
 					if ((rels[t].r_info >> 8) != (rels[r].r_info >> 8)) {
-						WARN_LOG_REPORT(Log::Loader, "ELF relocation HI16/LO16 with mismatching r_info lo=%08x, hi=%08x", rels[t].r_info, rels[r].r_info);
+						WARN_LOG_REPORT(Log::Loader, "ELF relocation HI16/LO16 with mismatching r_info lo=%08x, hi=%08x", (unsigned int)rels[t].r_info, (unsigned int)rels[r].r_info);
 					}
 					if (log) {
 						DEBUG_LOG(Log::Loader, "Corresponding lo found at %08x", corrLoAddr);
@@ -520,7 +520,7 @@ void ElfReader::LoadRelocations2(int rel_seg)
 
 
 int ElfReader::LoadInto(u32 loadAddress, bool fromTop) {
-	DEBUG_LOG(Log::Loader,"String section: %i", header->e_shstrndx);
+	DEBUG_LOG(Log::Loader,"String section: %i", (int)header->e_shstrndx);
 
 	if (size_ < sizeof(Elf32_Ehdr)) {
 		ERROR_LOG(Log::Loader, "Truncated ELF header, %d bytes", (int)size_);
@@ -689,7 +689,7 @@ int ElfReader::LoadInto(u32 loadAddress, bool fromTop) {
 		DEBUG_LOG(Log::Loader,"Prerelocated executable");
 	}
 
-	DEBUG_LOG(Log::Loader,"%i segments:", header->e_phnum);
+	DEBUG_LOG(Log::Loader,"%i segments:", (int)header->e_phnum);
 
 	// First pass: Get the bits into RAM
 	u32 baseAddress = bRelocate ? vaddr : 0;
@@ -741,7 +741,7 @@ int ElfReader::LoadInto(u32 loadAddress, bool fromTop) {
 	}
 	memblock.ListBlocks(LogLevel::LDEBUG);
 
-	DEBUG_LOG(Log::Loader, "%d sections:", header->e_shnum);
+	DEBUG_LOG(Log::Loader, "%d sections:", (int)header->e_shnum);
 
 	sectionOffsets = new u32[GetNumSections()];
 	sectionAddrs = new u32[GetNumSections()];
@@ -794,7 +794,7 @@ int ElfReader::LoadInto(u32 loadAddress, bool fromTop) {
 				if (GetSectionDataOffset(i) + sizeof(Elf32_Rel) * numRelocs > size_)
 					rels = nullptr;
 
-				DEBUG_LOG(Log::Loader,"%s: Performing %i relocations on %s : offset = %08x", name, numRelocs, GetSectionName(sectionToModify), sections[i].sh_offset);
+				DEBUG_LOG(Log::Loader,"%s: Performing %i relocations on %s : offset = %08x", name, numRelocs, GetSectionName(sectionToModify), (unsigned int)sections[i].sh_offset);
 				if (!rels || !LoadRelocations(rels, numRelocs)) {
 					WARN_LOG(Log::Loader, "LoadInto: Relocs failed, trying anyway");
 				}			
@@ -1034,7 +1034,7 @@ static bool CompanionElfMatchesModule(const std::string &data, u32 moduleSize, c
 	for (int i = 0; i < header->e_shnum; i++) {
 		const Elf32_Shdr *s = (const Elf32_Shdr *)(data.data() + header->e_shoff + (size_t)i * header->e_shentsize);
 		if (s->sh_addr)
-			top = std::max(top, s->sh_addr + s->sh_size);
+			top = std::max(top, (u32)s->sh_addr + (u32)s->sh_size);
 	}
 	*why = "image size doesn't match the loaded module";
 	if (top > moduleSize || top + 0x1000 < moduleSize)

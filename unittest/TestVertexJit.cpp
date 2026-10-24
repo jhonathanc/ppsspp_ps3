@@ -145,14 +145,14 @@ public:
 	}
 
 	u16 Get16() {
-		u16_le result;
+		u16 result;
 		memcpy(&result, dst_ + dstPos_, sizeof(result));
 		dstPos_ += sizeof(result);
 		return result;
 	}
 
 	float GetFloat() {
-		float_le result;
+		float result;
 		memcpy(&result, dst_ + dstPos_, sizeof(result));
 		dstPos_ += sizeof(result);
 		return result;

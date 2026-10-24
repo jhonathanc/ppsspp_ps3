@@ -15,14 +15,25 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include "GPU/PS3Profile.h"
+#include "Common/FrontendTrace.h"
+#if defined(__ALTIVEC__)
+#include <altivec.h>
+#undef vector
+#undef pixel
+#undef bool
+#endif
 #include "ppsspp_config.h"
 
 #include <atomic>
 #include <cfloat>
 #include <climits>
 #include <cmath>
-#include <functional>
+#include <condition_variable>
+#include <mutex>
 #include <thread>
+#include <chrono>
+#include <functional>
 
 #include "Common/Common.h"
 #include "Common/CPUDetect.h"
@@ -41,10 +52,17 @@
 #include "GPU/GPUStateSIMDUtil.h"
 #include "Common/Math/SIMDHeaders.h"
 #include "GPU/Software/BinManager.h"
+#include "GPU/Software/HardwareBackend.h"
 #include "GPU/Software/Clipper.h"
 #include "GPU/Software/Lighting.h"
 #include "GPU/Software/RasterizerRectangle.h"
+#include "GPU/Common/TextureDecoder.h"
 #include "GPU/Software/TransformUnit.h"
+#include "GPU/Software/TLPrepSpu.h"
+#define TLK_GET(ls, ea, len) memcpy((ls), (const void *)(uintptr_t)(ea), (len))
+#define TLK_PUT(ls, ea, len) memcpy((void *)(uintptr_t)(ea), (ls), (len))
+#define TLK_SYNC()
+#include "GPU/Software/TLPrepKernel.h"
 
 // For the SSE4 stuff
 #if PPSSPP_ARCH(SSE2)
@@ -289,6 +307,10 @@ static inline Vec3Packedf GETexGen(Vec4F32 source, const GERowSumRows &rows) {
 	return Vec3Packedf(out[0], out[1], out[2]);
 }
 
+#if defined(PPSSPP_PS3_RSX)
+#include "PS3/rsx/MatrixCache.inl"
+#endif
+
 template <bool depthClamp, bool alwaysCheckRange>
 static ScreenCoords ClipToScreenInternal(Vec3f scaled, const ClipCoords &coords, bool *outside_range_flag) {
 	// Account for rounding for X and Y.
@@ -391,6 +413,9 @@ struct TransformState {
 	bool fogGE;
 	GERowSumRows viewZRows;
 	GERowSumEntries viewZEntries;
+#if defined(PPSSPP_PS3_RSX)
+	float viewZColumn[4];
+#endif
 	float fogEnd;
 	float fogSlope;
 	Vec3f screenScale;
@@ -445,6 +470,7 @@ void ComputeTransformState(TransformState *state, const VertexReader &vreader) {
 	if (state->enableTransform) {
 		bool canSkipWorldPos = true;
 		if (state->enableLighting) {
+			PS3_PROFILE(geXfLight);
 			Lighting::ComputeState(&state->lightingState, vreader.hasColor0());
 			canSkipWorldPos = !state->lightingState.usesWorldPos;
 		} else {
@@ -477,17 +503,33 @@ void ComputeTransformState(TransformState *state, const VertexReader &vreader) {
 			state->tgenRows.Set(rows);
 		}
 
+		float worldview[16];
+#if defined(PPSSPP_PS3_RSX)
+		uint32_t world[16], view[16], worldviewBits[16], proj[16], mvp[16];
+		Matrix4x3To4x4Bits(view, gstate.viewMatrix);
+		Matrix4x3To4x4Bits(world, gstate.worldMatrix);
+		GECombineMatricesBitsMemo(worldviewBits, world, view);
+		memcpy(worldview, worldviewBits, sizeof(worldview));
+
+#else
 		float world[16];
 		float view[16];
-		float worldview[16];
 		ConvertMatrix4x3To4x4(view, gstate.viewMatrix);
 		ConvertMatrix4x3To4x4(world, gstate.worldMatrix);
 		GECombineMatrices(worldview, world, view);
 
+#endif
+
 		// Clip coordinates always come from the model position and the matrices combined like the GE does
 		// it, in the order (world * view) * projection. The world position is only needed for lighting.
 		state->matrixMode = (uint8_t)(canSkipWorldPos ? MatrixMode::POS_TO_CLIP : MatrixMode::WORLD_TO_CLIP);
+#if defined(PPSSPP_PS3_RSX)
+		memcpy(proj, gstate.projMatrix, sizeof(proj));
+		GECombineMatricesBitsMemo(mvp, worldviewBits, proj);
+		memcpy(state->matrix, mvp, sizeof(mvp));
+#else
 		GECombineMatrices(state->matrix, worldview, gstate.projMatrix);
+#endif
 		const float *m = state->matrix;
 		const Vec4F32 clipRows[4] = { Vec4F32::Load(m), Vec4F32::Load(m + 4), Vec4F32::Load(m + 8), Vec4F32::Load(m + 12) };
 		state->clipRows.Set(clipRows);
@@ -514,6 +556,9 @@ void ComputeTransformState(TransformState *state, const VertexReader &vreader) {
 			state->viewZRows.Set(viewZRows);
 			const float viewZ[4] = { worldview[2], worldview[6], worldview[10], worldview[14] };
 			state->viewZEntries.Set(viewZ);
+#if defined(PPSSPP_PS3_RSX)
+			memcpy(state->viewZColumn, viewZ, sizeof(viewZ));
+#endif
 			state->fogEnd = TruncateToFloat24(fogEnd);
 			state->fogSlope = TruncateToFloat24(fogSlope);
 
@@ -843,8 +888,8 @@ SoftDirty TransformUnit::GetDirty() {
 static float ReadRawComponent(const u8 *p, int fmt, int i) {
 	switch (fmt) {
 	case 1: return ((const s8 *)p)[i] * (1.0f / 128.0f);
-	case 2: { s16 v; memcpy(&v, p + 2 * i, 2); return v * (1.0f / 32768.0f); }
-	case 3: { float v; memcpy(&v, p + 4 * i, 4); return v; }
+	case 2: { s16_le v; memcpy(&v, p + 2 * i, 2); return v * (1.0f / 32768.0f); }
+	case 3: { float_le v; memcpy(&v, p + 4 * i, 4); return v; }
 	default: return 0.0f;
 	}
 }
@@ -852,8 +897,8 @@ static float ReadRawComponent(const u8 *p, int fmt, int i) {
 static float ReadRawWeight(const u8 *p, int fmt, int i) {
 	switch (fmt) {
 	case 1: return p[i] * (1.0f / 128.0f);
-	case 2: { u16 v; memcpy(&v, p + 2 * i, 2); return v * (1.0f / 32768.0f); }
-	case 3: { float v; memcpy(&v, p + 4 * i, 4); return v; }
+	case 2: { u16_le v; memcpy(&v, p + 2 * i, 2); return v * (1.0f / 32768.0f); }
+	case 3: { float_le v; memcpy(&v, p + 4 * i, 4); return v; }
 	default: return 0.0f;
 	}
 }
@@ -991,7 +1036,7 @@ static void ApplyGESkinning(u8 *decoded, const VertexDecoder &dec, const u8 *raw
 
 // A vertex color channel (0 r, 1 g, 2 b, 3 a) expanded to 8 bits.
 static float ReadRawColorChannel(const u8 *p, int fmt, int c) {
-	u16 v16;
+	u16_le v16;
 	memcpy(&v16, p, 2);
 	switch (fmt) {
 	case GE_VTYPE_COL_565 >> GE_VTYPE_COL_SHIFT: {
@@ -1081,14 +1126,52 @@ public:
 
 		if (useIndices_)
 			GetIndexBounds(indices, vertex_count, vertex_type, &lowerBound_, &upperBound_);
+		used_ = nullptr;
+		dec_ = &vdecoder;
+		raw_ = (const u8 *)vertices + vdecoder.VertexSize() * lowerBound_;
+		vertices_ = vertices;
 		if (vertex_count != 0 && !run_) {
+			PS3_PROFILE(decode);
 			const int count = upperBound_ - lowerBound_ + 1;
 			const UVScale uvScale = UsesGEUVScale(vertex_type) ? UVScale{ 1.0f, 1.0f, 0.0f, 0.0f } : LoadUVScaleOffset(gstate);
-			vdecoder.DecodeVerts(base, (const u8 *)vertices + vdecoder.VertexSize() * lowerBound_, &uvScale, count);
+			// Indices that use few vertices spread over a large range: decode only the used ones (in
+			// runs), and let the batched path skip the rest. Only with the hardware renderer, whose
+			// paths all read vertices through the indices.
+#if defined(PPSSPP_PS3_RSX) && defined(PPSSPP_NO_GL) && !PPSSPP_PLATFORM(PS3)
+			const bool hw = true;  // Test build: exercise it against the reference.
+#else
+			const bool hw = Rasterizer::g_hardwareBackend != nullptr;
+#endif
+			const bool sparse = hw && useIndices_ && count > 64 && count > 2 * vertex_count;
+			if (sparse) {
+				static std::vector<uint8_t> used;
+				used.assign(count, 0);
+				for (int i = 0; i < vertex_count; ++i)
+					used[conv_(i) - lowerBound_] = 1;
+				used_ = used.data();
+				const u8 *src = (const u8 *)vertices + vdecoder.VertexSize() * lowerBound_;
+				const int stride = vdecoder.GetDecVtxFmt().stride;
+				for (int j = 0; j < count;) {
+					if (!used[j]) {
+						++j;
+						continue;
+					}
+					int k = j + 1;
+					while (k < count && used[k])
+						++k;
+					vdecoder.DecodeVerts(base + j * stride, src + j * vdecoder.VertexSize(), &uvScale, k - j);
+					j = k;
+				}
+			} else {
+				vdecoder.DecodeVerts(base, (const u8 *)vertices + vdecoder.VertexSize() * lowerBound_, &uvScale, count);
+			}
 			const u8 *raw = (const u8 *)vertices + vdecoder.VertexSize() * lowerBound_;
-			if (vdecoder.morphcount > 1 && !vdecoder.throughmode)
+			// The decoder has already morphed and skinned in plain float. The GE-exact versions are
+			// expensive; the PS3 hardware renderer goes without them.
+			const bool exact = Rasterizer::g_hardwareBackend == nullptr;
+			if (exact && vdecoder.morphcount > 1 && !vdecoder.throughmode)
 				ApplyGEMorph(base, vdecoder, raw, count);
-			if (vdecoder.weighttype != 0 && !vdecoder.throughmode)
+			if (exact && vdecoder.weighttype != 0 && !vdecoder.throughmode)
 				ApplyGESkinning(base, vdecoder, raw, count);
 		}
 
@@ -1101,6 +1184,31 @@ public:
 
 	const VertexReader &GetVertexReader() const {
 		return vreader_;
+	}
+
+	// For the batched hardware path: index into the decoded range, and the decoded-range size.
+	int DecodedIndex(int vtx) {
+		return useIndices_ ? (int)conv_(vtx) - lowerBound_ : vtx;
+	}
+	int DecodedCount() const {
+		return upperBound_ - lowerBound_ + 1;
+	}
+	// Decoded vertices actually referenced (nullptr: all of them).
+	const uint8_t *UsedMap() const {
+		return used_;
+	}
+	VertexReader &RawReader() {
+		return vreader_;
+	}
+	// The PSP vertex behind decoded vertex i, and the decoder (for the direct T&L check).
+	const u8 *RawVertex(int i) const {
+		return raw_ + (size_t)i * dec_->VertexSize();
+	}
+	const VertexDecoder &Decoder() const {
+		return *dec_;
+	}
+	const void *Vertices() const {
+		return vertices_;
 	}
 
 	bool IsThrough() const {
@@ -1170,11 +1278,26 @@ protected:
 	bool usePrepared_ = false;
 	const ClipVertexData *run_;
 	int runPos_;
+	const uint8_t *used_ = nullptr;
+	const VertexDecoder *dec_ = nullptr;
+	const u8 *raw_ = nullptr;
+	const void *vertices_ = nullptr;
 };
 
 // Static to reduce allocations mid-frame.
 std::vector<ClipVertexData> SoftwareVertexReader::cached_;
 std::vector<TransformUnit::PreparedPosition> SoftwareVertexReader::prepared_;
+
+#if defined(PPSSPP_PS3_RSX)
+#include "PS3/rsx/SoftwareTransform.inl"
+#else
+bool TransformUnit::FastMergePrim(const void *, const void *, GEPrimitiveType, int, u32, int *) { return false; }
+namespace Rasterizer {
+void GEBurstEnd() {}
+HardwareBackend *StartGEWorker(HardwareBackend *real) { return real; }
+void StopGEWorker() {}
+}
+#endif
 
 // Tuned on a 16 core Ryzen under WSL2, where a thread wake up costs the waker about 15 us and takes about 50 us
 // to arrive: on bare metal, other values may pay off. Below this, a run's vertices are transformed a draw at a
@@ -1287,6 +1410,21 @@ void TransformUnit::TransformRunChunk(int chunk, const VertexDecoder &vdecoder, 
 
 void TransformUnit::SubmitPrimitive(const void* vertices, const void* indices, GEPrimitiveType prim_type, int vertex_count, u32 vertex_type, int *bytesRead, SoftwareDrawEngine *drawEngine, int runCount)
 {
+	PS3_PROFILE(transform);
+#if defined(PPSSPP_PS3_RSX) && defined(PPSSPP_NO_GL) && !PPSSPP_PLATFORM(PS3)
+	static bool fuzzed = false;
+	static const bool fuzzEnv = getenv("PPSSPP_DIRECT_TL_FUZZ") != nullptr;
+	if (!fuzzed && fuzzEnv) {
+		fuzzed = true;
+		DirectTLFuzz(drawEngine, atoi(getenv("PPSSPP_DIRECT_TL_FUZZ")));
+	}
+	static bool jobFuzzed = false;
+	static const bool jobFuzzEnv = getenv("PPSSPP_TLJOB_FUZZ") != nullptr;
+	if (!jobFuzzed && jobFuzzEnv) {
+		jobFuzzed = true;
+		TLJobFuzz(drawEngine, atoi(getenv("PPSSPP_TLJOB_FUZZ")));
+	}
+#endif
 	VertexDecoder &vdecoder = *drawEngine->FindVertexDecoder(vertex_type);
 
 	if (bytesRead)
@@ -1306,6 +1444,73 @@ void TransformUnit::SubmitPrimitive(const void* vertices, const void* indices, G
 		return;
 	}
 
+#if defined(PPSSPP_PS3_RSX)
+	if (Rasterizer::g_hardwareBackend) {
+		FinishRun();
+	}
+	// RSX transform & lighting straight from PSP memory: no software decode at all.
+	// A continued primitive restarts like on the batched path below (which also needs data_index_ 0).
+	const GEPrimitiveType directPrim = prim_type == GE_PRIM_KEEP_PREVIOUS ? prev_prim_ : prim_type;
+	if (Rasterizer::g_hardwareBackend && Rasterizer::g_hardwareBackend->SupportsTL() && (prim_type != GE_PRIM_KEEP_PREVIOUS || data_index_ == 0) && !isImmDraw_ &&
+		(vertex_type & GE_VTYPE_THROUGH_MASK) == 0 && vertex_count >= 2) {
+		{
+			PS3_PROFILE_SAMPLED(geState);
+			binner_->UpdateState();
+		}
+		if (binner_->HasDirty(SoftDirty::LIGHT_ALL | SoftDirty::TRANSFORM_ALL)) {
+			PS3_PROFILE(geXformState);
+			VertexReader stateReader(decoded_, vdecoder.GetDecVtxFmt(), vertex_type);
+			ComputeTransformState(&transformState, stateReader);
+			binner_->ClearDirty(SoftDirty::LIGHT_ALL | SoftDirty::TRANSFORM_ALL);
+		}
+		const bool skipCullTL = !gstate.isCullEnabled() || gstate.isModeClear();
+		const CullType cullTL = skipCullTL ? CullType::OFF : (gstate.getCullMode() ? CullType::CCW : CullType::CW);
+		int miss = 3;
+		bool direct;
+		{
+			PS3_PROFILE_SAMPLED(geDirect);
+#if !PPSSPP_PLATFORM(PS3)
+			static const bool noDirectRects = getenv("PPSSPP_NO_DIRECTRECTS") != nullptr;  // Test builds: compare.
+#else
+			constexpr bool noDirectRects = false;
+#endif
+			if (directPrim == GE_PRIM_RECTANGLES) {
+				direct = data_index_ == 0 && !noDirectRects && DirectRects(*binner_, vdecoder, transformState, vertices, indices, vertex_type, vertex_count);
+				miss = 0;
+			} else
+				direct = DirectTLDraw(vdecoder, transformState, binner_->State(), vertices, indices, vertex_type, directPrim, vertex_count, cullTL, miss);
+		}
+		if (direct) {
+			data_index_ = 0;
+			prev_prim_ = directPrim;
+			hasDraws_ = true;
+			return;
+		}
+#if PPSSPP_ARCH(POWERPC)
+		PS3Profile::tlMiss[miss]++;
+#endif
+	}
+#if PPSSPP_ARCH(POWERPC)
+	else if ((vertex_type & GE_VTYPE_THROUGH_MASK) == 0 && Rasterizer::g_hardwareBackend) {
+		PS3Profile::tlMiss[3]++;
+	}
+#endif
+#if PPSSPP_ARCH(POWERPC)
+	PS3Profile::geCpuPrims++;
+	PS3Profile::Scope cpuPathTimer(PS3Profile::geCpuPath);
+#endif
+#if !PPSSPP_PLATFORM(PS3)
+	struct CpuPathLog {
+		std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+		int prim, count; u32 vtype;
+		~CpuPathLog() {
+			static const bool on = getenv("PPSSPP_CPUPATHLOG") != nullptr;
+			if (on) fprintf(stderr, "CPUPATH prim %d n %d vtype %06x thru %d us %.1f\n", prim, count, vtype & 0xFFFFFF, (vtype & GE_VTYPE_THROUGH_MASK) ? 1 : 0,
+				std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - t0).count());
+		}
+	} cpuPathLog{std::chrono::steady_clock::now(), (int)prim_type, vertex_count, vertex_type};
+#endif
+#endif
 	// Part of a run of draws transformed together (StartRun)?
 	bool fromRun = !indices && InRun(vertices, vertex_type) && vertex_count <= runRemaining_ && !binner_->HasDirty(SoftDirty::LIGHT_ALL | SoftDirty::TRANSFORM_ALL);
 	if (!fromRun) {
@@ -1356,6 +1561,21 @@ void TransformUnit::SubmitPrimitive(const void* vertices, const void* indices, G
 
 	bool skipCull = !gstate.isCullEnabled() || gstate.isModeClear();
 	const CullType cullType = skipCull ? CullType::OFF : (gstate.getCullMode() ? CullType::CCW : CullType::CW);
+
+#if defined(PPSSPP_PS3_RSX)
+#if defined(PPSSPP_PS3_RSX) && defined(PPSSPP_NO_GL) && !PPSSPP_PLATFORM(PS3)
+	const bool tryBatch = true;  // Test build: run the comparison.
+#else
+	const bool tryBatch = Rasterizer::g_hardwareBackend != nullptr;
+#endif
+	if (tryBatch && data_index_ == 0 && !isImmDraw_ &&
+		HardwareBatch(*this, vreader, transformState, binner_->State(), prim_type, vertex_count, cullType)) {
+		return;
+	}
+#endif
+	// Full per-vertex transform of the whole indexed range (after the batched path, which does its
+	// own and doesn't need this).
+	vreader.UpdateCache();
 
 	if (vreader.IsThrough() && cullType == CullType::OFF && prim_type == GE_PRIM_TRIANGLES && data_index_ == 0 && vertex_count >= 6 && ((vertex_count) % 6) == 0) {
 		// Some games send rectangles as a series of regular triangles.
@@ -1675,7 +1895,10 @@ void TransformUnit::Flush(GPUCommon *common, const char *reason) {
 
 	binner_->Flush(reason);
 	common->NotifyFlush();
-	hasDraws_ = false;
+	// A block transfer's flush writes back only the buffers over its memory (g_flushRange): with
+	// others still drawn-only, later reads of them must still flush.
+	hasDraws_ = Rasterizer::g_hardwareBackend && Rasterizer::g_flushRange.end > Rasterizer::g_flushRange.start &&
+		Rasterizer::g_hardwareBackend->HasPendingWrite(0x04000000, 0, 0x200000, 1);
 }
 
 void TransformUnit::GetStats(StringWriter &w) {
@@ -1687,10 +1910,27 @@ void TransformUnit::FlushIfOverlap(GPUCommon *common, const char *reason, bool m
 	if (!hasDraws_)
 		return;
 
+#if !PPSSPP_PLATFORM(PS3)
+	// Test builds: PPSSPP_NO_XFERRANGE=1 writes back everything as before (to compare).
+	static const bool noRange = getenv("PPSSPP_NO_XFERRANGE") != nullptr;
+#else
+	constexpr bool noRange = false;
+#endif
+	if (!noRange) {
+		Rasterizer::g_flushRange.start = addr;
+		Rasterizer::g_flushRange.end = addr + stride * (h ? h - 1 : 0) + w;
+		Rasterizer::g_flushRange.stride = stride;
+		Rasterizer::g_flushRange.width = w;
+	}
 	if (binner_->HasPendingWrite(addr, stride, w, h))
 		Flush(common, reason);
 	if (modifying && binner_->HasPendingRead(addr, stride, w, h))
 		Flush(common, reason);
+	Rasterizer::g_flushRange = Rasterizer::FlushRange();
+}
+
+bool TransformUnit::HasPendingWrite(uint32_t addr, uint32_t stride, uint32_t w, uint32_t h) {
+	return hasDraws_ && binner_->HasPendingWrite(addr, stride, w, h);
 }
 
 void TransformUnit::NotifyTexFlush() {
@@ -1700,3 +1940,7 @@ void TransformUnit::NotifyTexFlush() {
 void TransformUnit::NotifyClutUpdate(const void *src) {
 	binner_->UpdateClut(src);
 }
+
+#if defined(PPSSPP_PS3_RSX)
+#include "PS3/rsx/SoftwareTransformBench.inl"
+#endif

@@ -17,8 +17,27 @@
 
 #pragma once
 
+#include <cstring>
+
+#include "Common/Swap.h"
 #include "Core/HW/MediaEngine.h"
 #include "Core/HLE/sceAudiocodec.h"
+
+// Decoders produce native-endian samples for the internal mixer. Convert only
+// when the destination is PSP memory, including unaligned guest buffers.
+inline void ConvertAudioSamplesToGuest(void *buffer, int sampleCount) {
+#if COMMON_BIG_ENDIAN
+	if (!buffer)
+		return;
+	auto bytes = static_cast<u8 *>(buffer);
+	for (int i = 0; i < sampleCount; ++i) {
+		int16_t sample;
+		memcpy(&sample, bytes + i * sizeof(sample), sizeof(sample));
+		const s16_le guestSample = sample;
+		memcpy(bytes + i * sizeof(sample), &guestSample, sizeof(guestSample));
+	}
+#endif
+}
 
 // Decodes packet by packet - does NOT demux.
 

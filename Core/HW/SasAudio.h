@@ -23,6 +23,7 @@
 #pragma once
 
 #include "Common/CommonTypes.h"
+#include "Common/Swap.h"
 #include "Core/HW/BufferQueue.h"
 #include "Core/HW/SasReverb.h"
 
@@ -101,6 +102,7 @@ enum VoiceType {
 // VAG is a Sony ADPCM audio compression format, which goes all the way back to the PSX.
 // It compresses 28 16-bit samples into a block of 16 bytes.
 class VagDecoder {
+	friend struct SasKernelBridge;
 public:
 	void Start(u32 dataPtr, u32 vagSize, bool loopEnabled);
 
@@ -153,6 +155,7 @@ private:
 };
 
 class ADSREnvelope {
+	friend struct SasKernelBridge;
 public:
 	void SetSimpleEnvelope(u32 ADSREnv1, u32 ADSREnv2);
 	void SetEnvelope(int flag, int a, int d, int s, int r);
@@ -314,12 +317,13 @@ public:
 
 	void Mix(u32 outAddr, u32 inAddr, int leftVol, int rightVol, bool mute);
 	void MixVoice(SasVoice &voice);
+	void MixVoices();
 
 	// Applies reverb to send buffer, according to waveformEffect.
 	void ApplyWaveformEffect();
 	void SetWaveformEffectType(int type);
 	void SetWaveformEffectParams(int delay, int feedback);
-	void WriteMixedOutput(s16 *outp, const s16 *inp, int leftVol, int rightVol);
+	void WriteMixedOutput(s16_le *outp, const s16_le *inp, int leftVol, int rightVol);
 
 	void GetDebugText(char *text, size_t bufsize);
 

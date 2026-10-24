@@ -16,9 +16,8 @@
 #include "GPU/Debugger/Debugger.h"
 #include "GPU/ge_constants.h"
 
-#if defined(__ANDROID__)
 #include <atomic>
-#endif
+#include <mutex>
 
 // X11, sigh.
 #ifdef None
@@ -55,13 +54,42 @@ inline bool IsTrianglePrim(GEPrimitiveType prim) {
 }
 
 struct TransformStats;
+extern int g_geTimingPercent;
+
+// GE lists on a thread of their own (PS3 setting, off by default): ProcessDLQueue hands the queue to
+// that thread and returns, and the emulation thread runs on. What the processing does to the
+// emulated system (GE interrupts, sync events) is kept and done on the emulation thread once the
+// thread is done; anything else that touches the GPU first waits for it (AsyncWait). The game
+// learns the GE is done only through those, so it can't reuse memory the lists still read.
+extern bool g_geAsyncLists;
+// ... and emulated time may run past what the list thread has got to: its interrupts and sync
+// events come when it's done (as if the GE were slower), and the game's code for the next frame
+// runs while it works through this one. Games only see the GE done through those, so they can't
+// reuse memory the lists still read.
+extern bool g_geAsyncRunAhead;
+// HACK on top of run-ahead: sceGeDrawSync / sceGeListSync(…, 0) don't wait for the list thread, and
+// the game goes on as if its lists were drawn. Only safe if the game doesn't reuse what the lists
+// read before the next frame (double-buffered lists and vertex data).
+extern bool g_geAsyncNoSyncWait;
+// Why the emulation thread waited for the GE list thread to finish (PS3 perf line).
+enum GeAsyncReason { GEASYNC_OTHER, GEASYNC_GAME_SYNC, GEASYNC_NEXT_LISTS, GEASYNC_VBLANK, GEASYNC_PRESENT, GEASYNC_IDLE, GEASYNC_COUNT };
+extern uint64_t g_geAsyncWaitTicks[GEASYNC_COUNT], g_geAsyncWaitCount[GEASYNC_COUNT];
+class GeListThread;
+
+// Display lists the GE ran from VRAM in the last few frames (PS3 RSX renderer): a framebuffer
+// write-back leaves them alone. Midnight Club L.A. CALLs one kept right after a small effect buffer.
+// Returns the first such list overlapping [start, end) (VRAM addresses, any mirror).
+bool GeVramListOverlap(u32 start, u32 end, u32 *listStart, u32 *listEnd);
+// Every GE CALL (both GPUCommon's and the software GPU's): depth is the stack slot it pushes.
+void GeVramCallNote(u32 target, int depth);
+
 class GPUCommon {
 public:
 	GPUCommon(const GPUCommon &) = delete;
 	GPUCommon &operator=(const GPUCommon &) = delete;
 	// The constructor might run on the loader thread.
 	GPUCommon(GraphicsContext *gfxCtx, Draw::DrawContext *draw);
-	virtual ~GPUCommon() = default;
+	virtual ~GPUCommon();
 
 	virtual void GetStats(StringWriter &w) = 0;
 	virtual std::vector<const VirtualFramebuffer *> GetFramebufferList() const = 0;
@@ -119,7 +147,19 @@ public:
 
 	virtual void PreExecuteOp(u32 op, u32 diff) {}
 
-	DLResult ProcessDLQueue();
+	// allowAsync: may hand the lists to the GE list thread (g_geAsyncLists); only from a game thread's
+	// sceGeListEnQueue / sceGeListUpdateStallAddr, everything else keeps the exact order.
+	DLResult ProcessDLQueue(bool allowAsync = false);
+	// Waits for the GE list thread (g_geAsyncLists), then does what its processing left for the
+	// emulation thread. Cheap when it's idle.
+	// reason: for the PS3 perf line (GeAsyncReason).
+	void AsyncWait(int reason = 0);
+	bool AsyncBusy() const { return asyncBusy_.load(std::memory_order_acquire); }
+	void StopAsync();
+	// CoreTiming, at each slice end (mustFinish false): emulated time doesn't pass what the list
+	// thread has got to (startingTicks + its cycles so far), so its interrupts and sync events are
+	// scheduled at the same emulated times as without it. Before idling (true): waits for it.
+	void AsyncGate(bool mustFinish);
 
 	u32 UpdateStall(int listid, u32 newstall, bool *runList);
 	u32 EnqueueList(u32 listpc, u32 stall, int subIntrBase, PSPPointer<PspGeListArgs> args, bool head, bool *runList);
@@ -235,6 +275,8 @@ public:
 	// How much of the first row of a texture at addr the video frames written there cover, in bytes,
 	// counting from addr. 0 if not known.
 	u32 VideoRowBytesFrom(u32 addr, u32 rowBytes) const;
+	// Video diagnostics: the list run in progress (for a GE sync scheduled far ahead).
+	std::string RunSoFarText() const;
 	bool VideoIsPlaying() const {
 		return !videos_.empty();
 	}
@@ -283,6 +325,7 @@ public:
 	void SetCmdValue(u32 op);
 
 	DisplayList* getList(int listid) {
+		AsyncWait();
 		return &dls[listid];
 	}
 	bool IsValidListId(int listid) const {
@@ -290,9 +333,11 @@ public:
 	}
 
 	const std::list<int> &GetDisplayListQueue() {
+		AsyncWait();
 		return dlQueue;
 	}
 	const DisplayList &GetDisplayList(int index) {
+		AsyncWait();
 		return dls[index];
 	}
 
@@ -341,7 +386,7 @@ public:
 	void NotifyFlush();
 
 protected:
-	DLResult RunDLQueue();
+	DLResult RunDLQueue(bool allowAsync);
 	// While debugging is active, these may block.
 	void NotifyDisplay(u32 framebuf, u32 stride, int format);
 
@@ -494,8 +539,60 @@ protected:
 	std::vector<std::pair<int, int>> restrictPrimRanges_;
 	std::string restrictPrimRule_;
 
+	// GE list thread (g_geAsyncLists).
+	DLResult ProcessDLQueueBody();
+	friend class GeListThread;
+	// __GeTriggerSync / __GeTriggerInterrupt, kept for the emulation thread while on the list thread.
+	void TriggerSync(GPUSyncType type, int id, u64 atTicks);
+	bool TriggerInterrupt(int listid, u32 pc, u64 atTicks);
+	// CPU-side notes (cache invalidation, memory copies) that came while the list thread ran: done
+	// after it, before the next lists (the lists in flight were the GE's before these writes).
+	enum class DeferredOp : u8 { INVALIDATE, COPY, SET, READBACK, WRITE_COLOR, VIDEO_COPY };
+	bool AsyncDefer(DeferredOp op, u32 a, u32 b, int size, u32 extra);
+	struct AsyncEffect {
+		bool interrupt;
+		GPUSyncType type;
+		int id;
+		u32 pc;
+		u64 ticks;
+	};
+	struct AsyncCpuOp {
+		DeferredOp op;
+		u32 a, b;
+		int size;
+		u32 extra;
+	};
+	std::vector<AsyncEffect> asyncEffects_;
+	std::vector<AsyncCpuOp> asyncCpuOps_;
+	// List thread: its cycles so far, published for AsyncGate (each draw and jump).
+	void PublishAsyncProgress() {
+		if (asyncPublish_) {
+			asyncProgress_.store(cyclesExecuted, std::memory_order_release);
+			if (asyncGateWaiting_.load(std::memory_order_relaxed))
+				NotifyAsyncGate();
+		}
+	}
+	void NotifyAsyncGate();
+	void TakeAsyncEffects();
+	std::atomic<bool> asyncBusy_{false};
+	std::atomic<int> asyncProgress_{0};
+	std::atomic<bool> asyncGateWaiting_{false};
+	bool asyncPublish_ = false;  // List thread only.
+	u64 asyncStartTicks_ = 0;    // Emulation thread only.
+	std::mutex asyncEffectsLock_;
+	GeListThread *asyncThread_ = nullptr;
+
 private:
 	void DoExecuteCall(u32 target);
 	void PopDLQueue();
 	void CompleteFailedList(DisplayList &list);
 };
+
+// Video diagnostics: GE time per display list run (GPUCommon::ProcessDLQueue), printed and reset by
+// GeListTimeStatsText() from sceMpeg's once-a-second line.
+struct GeListTimeStats {
+	int runs = 0;
+	s64 totalUs = 0, maxUs = 0, backlogUs = 0, backlogMaxUs = 0, fillUs = 0, transferUs = 0;
+};
+extern GeListTimeStats g_geListTimeStats;
+std::string GeListTimeStatsText();

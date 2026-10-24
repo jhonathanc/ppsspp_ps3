@@ -1150,6 +1150,7 @@ namespace MIPSInt {
 		{
 		case 4:	//sqrt
 			F(fd) = sqrtf(F(fs));
+			FlushGuestFPUResult(mips, fd);
 			// A negative input gives a positive NaN, not the host's (cpu/fpu/roundmode).
 			if (F(fs) < 0.0f) {
 				FsI(fd) = 0x7FC00000;
@@ -1252,8 +1253,8 @@ namespace MIPSInt {
 
 		switch (op & 0x3f)
 		{
-		case 0: F(fd) = F(fs) + F(ft); break; // add.s
-		case 1: F(fd) = F(fs) - F(ft); break; // sub.s
+		case 0: F(fd) = F(fs) + F(ft); FlushGuestFPUResult(mips, fd); break; // add.s
+		case 1: F(fd) = F(fs) - F(ft); FlushGuestFPUResult(mips, fd); break; // sub.s
 		case 2: // mul.s
 			if ((my_isinf(F(fs)) && F(ft) == 0.0f) || (my_isinf(F(ft)) && F(fs) == 0.0f)) {
 				// Must be positive NAN, see #12519.
@@ -1261,6 +1262,7 @@ namespace MIPSInt {
 			} else {
 				F(fd) = F(fs) * F(ft);
 			}
+			FlushGuestFPUResult(mips, fd);
 			break;
 		case 3: // div.s
 		{
@@ -1289,6 +1291,7 @@ namespace MIPSInt {
 				}
 			}
 			F(fd) = F(fs) / F(ft);
+			FlushGuestFPUResult(mips, fd);
 			break;
 		}
 		default:

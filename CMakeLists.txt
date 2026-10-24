@@ -1,6 +1,48 @@
 # vim:noexpandtab:
 cmake_minimum_required(VERSION 3.16)
 project(PPSSPP)
+if(PS3)
+	if(PS3_PSL1GHT AND PS3_SONY_SDK)
+		message(FATAL_ERROR "Select only one PS3 SDK")
+	elseif(PS3_PSL1GHT)
+		add_compile_definitions(__PS3__ __PSL1GHT__ PPSSPP_PS3_JIT)
+	elseif(PS3_SONY_SDK)
+		add_compile_definitions(__PS3__ __PS3_SONY_SDK__)
+	else()
+		message(FATAL_ERROR "Select PS3_PSL1GHT or PS3_SONY_SDK with a PS3 toolchain")
+	endif()
+	# PSL1GHT has no desktop dynamic-loader library.
+	set(CMAKE_DL_LIBS "")
+endif()
+if(PPC_JIT_LINUX_TEST)
+	add_compile_definitions(PPSSPP_PS3_JIT PPSSPP_NO_GL)
+endif()
+# Desktop headless without OpenGL/Vulkan, for replaying GE dumps from the PS3 port with the
+# software renderer (fast, unlike under qemu).
+if(NO_GL_HOST)
+	add_compile_definitions(PPSSPP_NO_GL)
+endif()
+# Test builds: RSX_HOSTSIM_INCLUDE=<dir with PSL1GHT's ppu-types.h and rsx/> runs the PS3 RSX
+# renderer in PPSSPPHeadless over a stand-in RSX layer (PS3/hostsim/HostSimRSX.cpp).
+if(RSX_HOSTSIM_INCLUDE AND NOT PS3)
+	add_compile_definitions(PPSSPP_RSX_HOSTSIM)
+endif()
+# Builds without OpenGL/Vulkan: the PS3 port, the ppc64 Linux JIT test build, NO_GL_HOST.
+if(PS3 OR PPC_JIT_LINUX_TEST OR NO_GL_HOST)
+	set(NO_GL_BUILD ON)
+endif()
+option(PPSSPP_PS3_ASYNC_TESTS "Enable the experimental PS3 GE worker in host test builds" OFF)
+if(PPSSPP_PS3_ASYNC_TESTS)
+	add_compile_definitions(PPSSPP_PS3_ASYNC_TESTS)
+endif()
+option(PPSSPP_PS3_RSX "Build the PS3 software GPU hardware bridge" OFF)
+if(PS3_PSL1GHT OR RSX_HOSTSIM_INCLUDE)
+	set(PPSSPP_PS3_RSX ON)
+endif()
+if(PPSSPP_PS3_RSX)
+	add_compile_definitions(PPSSPP_PS3_RSX)
+endif()
+
 enable_testing()
 
 #This is supposed to work but doesn't!
@@ -74,6 +116,8 @@ if(CMAKE_SYSTEM_PROCESSOR)
 	elseif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "^loongarch64")
 		set(LOONGARCH64_DEVICE ON)
 		add_compile_options(-mlsx)
+	elseif(${CMAKE_SYSTEM_PROCESSOR} MATCHES "^(powerpc|ppc)")
+		set(POWERPC_DEVICE ON)
 	else()
 		message("Unknown CMAKE_SYSTEM_PROCESSOR: ${CMAKE_SYSTEM_PROCESSOR}")
 	endif()
@@ -321,7 +365,7 @@ if(IOS AND NOT LIBRETRO)
 	set(NO_OPENGL ON)
 endif()
 
-if(NOT OPENGL_LIBRARIES AND NOT NO_OPENGL)
+if(NOT NO_GL_BUILD AND NOT OPENGL_LIBRARIES AND NOT NO_OPENGL)
 	if(POLICY CMP0072)
 		cmake_policy(SET CMP0072 NEW)
 	endif()
@@ -870,8 +914,12 @@ else()
 		target_sources(libzip PRIVATE
 			ext/libzip/zip_mkstempm.c
 			ext/libzip/zip_source_file_stdio_named.c
-			ext/libzip/zip_random_unix.c
 		)
+		if(PS3)
+			target_sources(libzip PRIVATE PS3/ZipRandom.c)
+		else()
+			target_sources(libzip PRIVATE ext/libzip/zip_random_unix.c)
+		endif()
 	endif()
 	target_compile_definitions(libzip PRIVATE HAVE_STDBOOL_H)
 	include_directories(ext/libzip)
@@ -929,7 +977,12 @@ else()
 		${PNG_ARM_INCLUDES}
 	)
 	set(PNG_LIBRARIES png17)
-	include_directories(ext/libpng17)
+	if(PS3)
+		# SDK portlibs may expose an older png.h than the library being built.
+		include_directories(BEFORE ext/libpng17)
+	else()
+		include_directories(ext/libpng17)
+	endif()
 endif()
 
 
@@ -1384,6 +1437,11 @@ if(HEADLESS)
 			Windows/W32Util/Misc.h
 		)
 	endif()
+	if(RSX_HOSTSIM_INCLUDE AND NOT PS3)
+		set(HostSimSource PS3/rsx/RSXRenderer.cpp PS3/rsx/TexSpu.cpp PS3/hostsim/HostSimRSX.cpp)
+		set_source_files_properties(${HostSimSource} PROPERTIES INCLUDE_DIRECTORIES ${RSX_HOSTSIM_INCLUDE})
+		list(APPEND HeadlessSource ${HostSimSource})
+	endif()
 	if(IOS)
 		# An app bundle, set up further down with the iOS app (see ios/HeadlessMain.mm).
 		add_executable(PPSSPPHeadless MACOSX_BUNDLE ${HeadlessSource})
@@ -1405,6 +1463,38 @@ if(HEADLESS)
 		target_link_libraries(PPSSPPHeadless d2d1 dwrite d3d11)
 	endif()
 	setup_target_project(PPSSPPHeadless headless)
+endif()
+
+if(PS3_PSL1GHT)
+	option(PS3_FRONTEND "Build experimental PS3 game-loading frontend" OFF)
+	if(PS3_FRONTEND)
+		add_executable(PPSSPPPS3 PS3/frontend/Main.cpp PS3/frontend/Threads.cpp PS3/frontend/Audio.cpp PS3/frontend/Canvas.cpp PS3/frontend/MenuScreens.cpp PS3/frontend/GameIcons.cpp
+			PS3/frontend/TransferFix.cpp PS3/rsx/RSXCore.cpp PS3/rsx/RSXSelfTest.cpp PS3/rsx/RSXRenderer.cpp PS3/rsx/TexSpu.cpp PS3/rsx/VideoInfo.cpp PS3/jit/MapiJitProbe.cpp
+			headless/Headless.cpp
+			headless/Compare.cpp headless/ReverseEngineer.cpp)
+		target_compile_definitions(PPSSPPPS3 PRIVATE PPSSPP_PS3_FRONTEND=1)
+		# Install folder (title ID) and name suffix: a diagnostics build next to the normal one.
+		set(PS3_APP_ID "PPSSPP001" CACHE STRING "PS3 title ID (install folder)")
+		set(PS3_EDITION "" CACHE STRING "Suffix of the build number in the app's name, e.g. ' diag'")
+		target_compile_definitions(PPSSPPPS3 PRIVATE "PPSSPP_PS3_APP_ID=\"${PS3_APP_ID}\"" "PPSSPP_PS3_EDITION=\"${PS3_EDITION}\"")
+		target_include_directories(PPSSPPPS3 PRIVATE "${PS3_SDK}/portlibs/ppu/include/SDL2")
+		target_link_libraries(PPSSPPPS3 Core "${PS3_SDK}/portlibs/ppu/lib/libSDL2.a"
+			gcm_sys rsx sysutil rt io audio sysmodule lv2 m)
+		if(FFmpeg_FOUND)
+			# After Core and its FFmpeg libraries: libavcodec needs zlib.
+			target_link_libraries(PPSSPPPS3 ${ZLIB_LIBRARIES})
+		endif()
+		target_link_options(PPSSPPPS3 PRIVATE "-Wl,--wrap=rsxSetTransferScaleSurface"
+			"-Wl,--wrap=pthread_create" "-Wl,--wrap=pthread_cond_init" "-Wl,--wrap=rsxInit")
+
+		# Standalone RSX diagnostics app (no emulator core).
+		add_executable(RSXDiag PS3/diag/DiagMain.cpp PS3/frontend/TransferFix.cpp
+			PS3/rsx/RSXCore.cpp PS3/rsx/RSXSelfTest.cpp PS3/rsx/VideoInfo.cpp)
+		target_include_directories(RSXDiag PRIVATE "${CMAKE_SOURCE_DIR}" "${PS3_SDK}/portlibs/ppu/include/SDL2")
+		target_link_libraries(RSXDiag "${PS3_SDK}/portlibs/ppu/lib/libSDL2.a"
+			gcm_sys rsx sysutil rt io audio sysmodule lv2 m)
+		target_link_options(RSXDiag PRIVATE "-Wl,--wrap=rsxSetTransferScaleSurface" "-Wl,--wrap=rsxInit")
+	endif()
 endif()
 
 if(UNITTEST)
@@ -1470,6 +1560,14 @@ if(UNITTEST)
 	endif()
 	if(WIN32)
 		target_link_libraries(PPSSPPUnitTest d2d1 dwrite d3d11)
+	endif()
+	if(NO_GL_BUILD AND NOT MSVC)
+		# Keep the offline shader compiler; discard unused Vulkan device code.
+		if(APPLE)
+			target_link_options(PPSSPPUnitTest PRIVATE -Wl,-dead_strip)
+		else()
+			target_link_options(PPSSPPUnitTest PRIVATE -Wl,--gc-sections)
+		endif()
 	endif()
 	setup_target_project(PPSSPPUnitTest unittest)
 	add_test(arm64_emitter PPSSPPUnitTest Arm64Emitter)

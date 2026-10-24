@@ -35,6 +35,8 @@
 #elif PPSSPP_PLATFORM(SWITCH)
 // TODO: Implement Crash() for Switch, lets not use breakpoint for the time being
 #define Crash() {*((volatile u32 *)0x0) = 0xDEADC0DE;}
+#elif PPSSPP_PLATFORM(PS3)
+#define Crash() {__builtin_trap();}
 #elif PPSSPP_ARCH(ARM)
 #define Crash() {asm ("bkpt #0");}
 #elif PPSSPP_ARCH(ARM64)

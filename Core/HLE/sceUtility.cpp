@@ -694,33 +694,33 @@ void UtilityDialogInitialize(UtilityDialogType type, int delayUs, int accessPrio
 	int partDelay = delayUs / 4;
 	accessPriority = HelperPriority(accessPriority);
 	const int dialogPriority = PhasePriority(graphicsPriority, accessPriority);
-	const u32_le insts[] = {
+	const u32 insts[] = {
 		// Make sure we don't discard/deadbeef a0.
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_S0, MIPS_REG_A0, 0),
+		MIPS_MAKE_ORI(MIPS_REG_S0, MIPS_REG_A0, 0),
 
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, 0),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A1, MIPS_REG_ZERO, 0),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A2, MIPS_REG_ZERO, 0),
-		(u32_le)MIPS_MAKE_SYSCALL("sceSuspendForUser", "sceKernelVolatileMemLock"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, 0),
+		MIPS_MAKE_ORI(MIPS_REG_A1, MIPS_REG_ZERO, 0),
+		MIPS_MAKE_ORI(MIPS_REG_A2, MIPS_REG_ZERO, 0),
+		MIPS_MAKE_SYSCALL("sceSuspendForUser", "sceKernelVolatileMemLock"),
 
 		// Loading, at accessThread priority.
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
-		(u32_le)MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
-		(u32_le)MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
-		(u32_le)MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
+		MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
+		MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
+		MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
 
 		// Setting up the dialog, at graphicsThread priority, then the status goes to RUNNING.
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, 0),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A1, MIPS_REG_ZERO, dialogPriority),
-		(u32_le)MIPS_MAKE_SYSCALL("ThreadManForUser", "sceKernelChangeThreadPriority"),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
-		(u32_le)MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, 0),
+		MIPS_MAKE_ORI(MIPS_REG_A1, MIPS_REG_ZERO, dialogPriority),
+		MIPS_MAKE_SYSCALL("ThreadManForUser", "sceKernelChangeThreadPriority"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
+		MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
 
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, (int)type),
-		(u32_le)MIPS_MAKE_JR_RA(),
-		(u32_le)MIPS_MAKE_SYSCALL("sceUtility", "__UtilityInitDialog"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, (int)type),
+		MIPS_MAKE_JR_RA(),
+		MIPS_MAKE_SYSCALL("sceUtility", "__UtilityInitDialog"),
 	};
 
 	CleanupDialogThreads(true);
@@ -741,36 +741,36 @@ void UtilityDialogShutdown(UtilityDialogType type, int delayUs, int accessPriori
 	// (pspautotests utility/savedata/shutdownstatus). Freak Out calls ShutdownStart from 0x20 and
 	// waits for SHUTDOWN; NFL Street 3 calls it from 111 and then InitStart straight away.
 	const int finalPriority = type == UtilityDialogType::SAVEDATA ? 0x20 : accessPriority;
-	const u32_le insts[] = {
+	const u32 insts[] = {
 		// Make sure we don't discard/deadbeef 'em.
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_S0, MIPS_REG_A0, 0),
+		MIPS_MAKE_ORI(MIPS_REG_S0, MIPS_REG_A0, 0),
 
 		// Tearing down the dialog, at graphicsThread priority.
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, 0),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A1, MIPS_REG_ZERO, dialogPriority),
-		(u32_le)MIPS_MAKE_SYSCALL("ThreadManForUser", "sceKernelChangeThreadPriority"),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
-		(u32_le)MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
-		(u32_le)MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, 0),
+		MIPS_MAKE_ORI(MIPS_REG_A1, MIPS_REG_ZERO, dialogPriority),
+		MIPS_MAKE_SYSCALL("ThreadManForUser", "sceKernelChangeThreadPriority"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
+		MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
+		MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
 
 		// Cleaning up at accessThread priority.
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, 0),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A1, MIPS_REG_ZERO, accessPriority),
-		(u32_le)MIPS_MAKE_SYSCALL("ThreadManForUser", "sceKernelChangeThreadPriority"),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
-		(u32_le)MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
-		(u32_le)MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, 0),
+		MIPS_MAKE_ORI(MIPS_REG_A1, MIPS_REG_ZERO, accessPriority),
+		MIPS_MAKE_SYSCALL("ThreadManForUser", "sceKernelChangeThreadPriority"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
+		MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_S0, 0),
+		MIPS_MAKE_SYSCALL("sceUtility", "__UtilityWorkUs"),
 
 		// Then the status goes to NONE, from priority finalPriority (see below).
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, 0),
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A1, MIPS_REG_ZERO, finalPriority),
-		(u32_le)MIPS_MAKE_SYSCALL("ThreadManForUser", "sceKernelChangeThreadPriority"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, 0),
+		MIPS_MAKE_ORI(MIPS_REG_A1, MIPS_REG_ZERO, finalPriority),
+		MIPS_MAKE_SYSCALL("ThreadManForUser", "sceKernelChangeThreadPriority"),
 
-		(u32_le)MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, (int)type),
-		(u32_le)MIPS_MAKE_JR_RA(),
-		(u32_le)MIPS_MAKE_SYSCALL("sceUtility", "__UtilityFinishDialog"),
+		MIPS_MAKE_ORI(MIPS_REG_A0, MIPS_REG_ZERO, (int)type),
+		MIPS_MAKE_JR_RA(),
+		MIPS_MAKE_SYSCALL("sceUtility", "__UtilityFinishDialog"),
 	};
 
 	// Starting the thread reschedules normally, so a caller with worse priority than every phase

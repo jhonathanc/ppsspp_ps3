@@ -1056,7 +1056,7 @@ void Register_LoadExecForUser()
 static int sceKernelExitVSH(u32 paramPtr) {
 	if (Memory::IsValidRange(paramPtr, sizeof(SceKernelLoadExecVSHParam))) {
 		auto param = PSPPointer<SceKernelLoadExecVSHParam>::Create(paramPtr);
-		INFO_LOG(Log::sceKernel, "sceKernelExitVSH: size=%d, args=%08x, argp=%08x, flags=%08x", param->size, param->args, param->argp, param->flags);
+		INFO_LOG(Log::sceKernel, "sceKernelExitVSH: size=%d, args=%08x, argp=%08x, flags=%08x", (int)param->size, (unsigned int)param->args, (unsigned int)param->argp, (unsigned int)param->flags);
 	}
 
 	INFO_LOG(Log::sceKernel, "sceKernelExitVSH");

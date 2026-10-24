@@ -307,8 +307,8 @@ std::vector<u32> TranslateDebugBufferToCompare(const GPUDebugBuffer *buffer, u32
 	std::vector<u32> data;
 	data.resize(stride * h, 0);
 
-	const u32 *pixels32 = (const u32 *)buffer->GetData();
-	const u16 *pixels16 = (const u16 *)buffer->GetData();
+	const u32_le *pixels32 = (const u32_le *)buffer->GetData();
+	const u16_le *pixels16 = (const u16_le *)buffer->GetData();
 	int outStride = buffer->GetStride();
 	if (buffer->GetFlipped()) {
 		// The buffer is stored bottom-up (e.g. to fit a bitmap), so read backwards
@@ -328,7 +328,8 @@ std::vector<u32> TranslateDebugBufferToCompare(const GPUDebugBuffer *buffer, u32
 			ConvertBGRA8888ToRGBA8888(&dst[y * stride], pixels32, safeW);
 			break;
 		case GPU_DBG_FORMAT_8888_BGRA:
-			memcpy(&dst[y * stride], pixels32, safeW * sizeof(u32));
+			for (u32 x = 0; x < safeW; ++x)
+				dst[y * stride + x] = pixels32[x];
 			break;
 
 		case GPU_DBG_FORMAT_565:
@@ -415,6 +416,12 @@ double ScreenshotComparer::Compare(const Path &screenshotFilename) {
 		return -1.0f;
 	}
 
+#if COMMON_BIG_ENDIAN
+	// BMP BGRA and decoded PNG RGBA are byte arrays, not native u32 values.
+	for (size_t i = 0; i < (size_t)h_ * referenceStride_; ++i)
+		reference_[i] = bswap32(reference_[i]);
+#endif
+
 	double errors = 0;
 	if (asBitmap_) {
 		// The reference is a BMP, stored bottom-up and BGRA by default for the
@@ -454,8 +461,12 @@ bool ScreenshotComparer::SaveActualBitmap(const Path &resultFilename) {
 	if (saved) {
 		fwrite(&header, sizeof(header), 1, saved);
 		// Bitmaps are stored bottom-up, so write the rows backwards (pixels_ is top-down).
-		for (u32 y = 0; y < h_; ++y)
-			fwrite(pixels_.data() + (h_ - y - 1) * stride_, sizeof(u32), stride_, saved);
+		std::vector<u32_le> row(stride_);
+		for (u32 y = 0; y < h_; ++y) {
+			for (u32 x = 0; x < stride_; ++x)
+				row[x] = pixels_[(h_ - y - 1) * stride_ + x];
+			fwrite(row.data(), sizeof(u32_le), stride_, saved);
+		}
 		fclose(saved);
 
 		return true;

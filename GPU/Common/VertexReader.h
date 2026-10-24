@@ -2,6 +2,7 @@
 
 #include "Common/Math/CrossSIMD.h"
 #include "Common/Data/Convert/SmallDataConvert.h"
+#include "Common/Swap.h"
 #include "GPU/Common/VertexDecoderCommon.h"
 
 // Reads decoded vertex formats in a convenient way. For software transform and debugging.
@@ -139,7 +140,7 @@ public:
 		case DEC_U8_4:
 		{
 			const u8 *b = (const u8 *)(data_ + decFmt_.c0off);
-			u32 value;
+			u32_le value;
 			memcpy(&value, b, 4);
 			return value;
 		}

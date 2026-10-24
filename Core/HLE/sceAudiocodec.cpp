@@ -30,6 +30,7 @@
 #include "Core/Reporting.h"
 #include "Core/HW/SimpleAudioDec.h"
 #include "ext/at3_standalone/at3_decoders.h"
+#include "Core/HW/MediaEngine.h"
 
 // Following kaien_fr's sample code https://github.com/hrydgard/ppsspp/issues/5620#issuecomment-37086024
 // Should probably store the EDRAM get/release status somewhere within here, etc.
@@ -403,7 +404,7 @@ static int __AudioCodecInitCommon(u32 ctxPtr, int codec, bool mono) {
 	case PSP_CODEC_AAC:
 		if (!AacSampleRateFromContext(ctx)) {
 			// Refused before it gets to the ME.
-			return hleLogError(Log::ME, SCE_AVCODEC_ERROR_UNSUPPORTED, "bad AAC sample rate %d", ctx->fmt.aac.sampleRate);
+			return hleLogError(Log::ME, SCE_AVCODEC_ERROR_UNSUPPORTED, "bad AAC sample rate %d", (int)ctx->fmt.aac.sampleRate);
 		}
 		// Either flag makes Init send another ME command (0x95, 0x97), and both fail.
 		if (ctx->fmt.aac.flag2c || ctx->fmt.aac.flag2d) {
@@ -441,7 +442,7 @@ static int __AudioCodecInitCommon(u32 ctxPtr, int codec, bool mono) {
 		// ME command 0x68.
 		if (ctx->inited != 1) {
 			ctx->err = 0x8001;
-			return MECall(hleLogError(Log::ME, SCE_AVCODEC_ERROR_INVALID_DATA, "Atrac3+ context not marked inited (%d)", ctx->inited), InitUs(codec, ctx));
+			return MECall(hleLogError(Log::ME, SCE_AVCODEC_ERROR_INVALID_DATA, "Atrac3+ context not marked inited (%d)", (int)ctx->inited), InitUs(codec, ctx));
 		}
 		primingFrames = 1;
 		break;
@@ -452,11 +453,11 @@ static int __AudioCodecInitCommon(u32 ctxPtr, int codec, bool mono) {
 		bool jointStereo;
 		if (!Atrac3LayoutFromContext(ctx, &bytesPerFrame, &channels, &jointStereo)) {
 			ctx->err = 0x186;
-			return MECall(hleLogError(Log::ME, SCE_AVCODEC_ERROR_INVALID_DATA, "bad Atrac3 parameter %08x", *(const u32_le *)ctx->fmt.raw), InitUs(codec, ctx));
+			return MECall(hleLogError(Log::ME, SCE_AVCODEC_ERROR_INVALID_DATA, "bad Atrac3 parameter %08x", (unsigned int)*(const u32_le *)ctx->fmt.raw), InitUs(codec, ctx));
 		}
 		// InitMono only takes the mono layouts (0x0E, 0x0F) (pspautotests audio/audiocodec/at3errors).
 		if (mono && channels != 1) {
-			return hleLogError(Log::ME, SCE_AVCODEC_ERROR_UNSUPPORTED, "InitMono with stereo Atrac3 parameter %08x", *(const u32_le *)ctx->fmt.raw);
+			return hleLogError(Log::ME, SCE_AVCODEC_ERROR_UNSUPPORTED, "InitMono with stereo Atrac3 parameter %08x", (unsigned int)*(const u32_le *)ctx->fmt.raw);
 		}
 		ctx->fmt.atrac3.sampleRate = 44100;
 		ctx->fmt.atrac3.channelBytes = bytesPerFrame / channels;
@@ -603,7 +604,7 @@ static int sceAudiocodecDecode(u32 ctxPtr, int codec) {
 		int inDataConsumed = 0;
 		int outSamples = 0;
 
-		DEBUG_LOG(Log::ME, "decoder. in: %08x out: %08x format: %02x %02x", ctx->inBuf, ctx->outBuf, ctx->fmt.at3.formatByte1, ctx->fmt.at3.formatByte2);
+		DEBUG_LOG(Log::ME, "decoder. in: %08x out: %08x format: %02x %02x", (unsigned int)ctx->inBuf, (unsigned int)ctx->outBuf, ctx->fmt.at3.formatByte1, ctx->fmt.at3.formatByte2);
 
 		int16_t *outBuf = (int16_t *)Memory::GetPointerWriteOrException(ctx->outBuf);
 
@@ -631,7 +632,12 @@ static int sceAudiocodecDecode(u32 ctxPtr, int codec) {
 		} else if (codec == PSP_CODEC_AT3PLUS && ctx->fmt.at3.outputChannels == 1) {
 			outputChannels = 1;
 		}
-		bool result = decoder->Decode(inBuf, bytesPerFrame, &inDataConsumed, outputChannels, outBuf, &outSamples);
+		bool result = false;
+#ifdef USE_FFMPEG
+		if (codec != PSP_CODEC_AAC || MediaVideoDecodeEnabled())
+#endif
+		result = decoder->Decode(inBuf, bytesPerFrame, &inDataConsumed, outputChannels, outBuf, &outSamples);
+		ConvertAudioSamplesToGuest(outBuf, outSamples * outputChannels);
 		if (!result && (codec == PSP_CODEC_AT3PLUS || codec == PSP_CODEC_AT3)) {
 			// What the hardware reports for a frame that doesn't decode (0x208 is also possible for
 			// Atrac3+, depending on how far into the frame the problem is). For Atrac3, 0x183 is a
@@ -648,7 +654,7 @@ static int sceAudiocodecDecode(u32 ctxPtr, int codec) {
 		}
 		if (!result) {
 			ctx->err = 0x20b;
-			ERROR_LOG(Log::ME, "AudioCodec decode failed. Setting error to %08x", ctx->err);
+			ERROR_LOG(Log::ME, "AudioCodec decode failed. Setting error to %08x", (unsigned int)ctx->err);
 		} else {
 			ctx->err = 0;
 			if (codec == PSP_CODEC_MP3) {
@@ -700,9 +706,9 @@ static int sceAudiocodecGetInfo(u32 ctxPtr, int codec) {
 			// What the hardware does without a frame to read: every field it would have filled
 			// in, and 0x2c, set to -1 (pspautotests audio/audiocodec/context). If a game ever lands
 			// here, its audio will be wrong in a way that starts right here.
-			WARN_LOG(Log::ME, "sceAudiocodecGetInfo: no MP3 frame at inBuf %08x", ctx->inBuf);
+			WARN_LOG(Log::ME, "sceAudiocodecGetInfo: no MP3 frame at inBuf %08x", (unsigned int)ctx->inBuf);
 			ctx->fmt.mp3.unk2c = 0xFFFFFFFF;
-			for (s32 *field = &ctx->fmt.mp3.version; field <= &ctx->fmt.mp3.emphasis; ++field) {
+			for (s32_le *field = &ctx->fmt.mp3.version; field <= &ctx->fmt.mp3.emphasis; ++field) {
 				*field = -1;
 			}
 			ctx->err = -2;
@@ -776,7 +782,7 @@ static int sceAudiocodecCheckNeedMem(u32 ctxPtr, int codec) {
 	ctx->err = 0;
 
 	static const int needMemUs[4] = { 147, 80, 79, 57 };
-	return MECall(hleLogInfo(Log::ME, 0, "%s: %x", GetCodecName(codec), ctx->neededMem), needMemUs[codec - 0x1000]);
+	return MECall(hleLogInfo(Log::ME, 0, "%s: %x", GetCodecName(codec), (unsigned int)ctx->neededMem), needMemUs[codec - 0x1000]);
 }
 
 static int sceAudiocodecGetEDRAM(u32 ctxPtr, int codec) {
@@ -785,7 +791,7 @@ static int sceAudiocodecGetEDRAM(u32 ctxPtr, int codec) {
 	// (pspautotests audio/audiocodec/context).
 	ctx->allocMem = 0x0018ea90;
 	ctx->edramAddr = (ctx->allocMem + 0x3f) & ~0x3f;  // round up to 64 bytes.
-	return MECall(hleLogInfo(Log::ME, 0, "edram address set to %08x", ctx->edramAddr), 56);
+	return MECall(hleLogInfo(Log::ME, 0, "edram address set to %08x", (unsigned int)ctx->edramAddr), 56);
 }
 
 // One parameter, not two: the real module (audiocodec_260.prx, 080007c0) reads only a0 and sets

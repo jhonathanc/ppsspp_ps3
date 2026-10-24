@@ -44,6 +44,7 @@
 #include "Core/HLE/sceMpegbase.h"
 #include "Core/HLE/scePower.h"
 #include "Core/HW/AvcDecoder.h"
+#include "Core/HW/MediaEngine.h"
 #include "Core/MemMap.h"
 #include "Core/MemMapHelpers.h"
 #include "Core/MIPS/MIPS.h"
@@ -734,6 +735,11 @@ static int sceVideocodecDecode(u32 ctxAddr, int type) {
 				auSize, auAddr);
 		}
 	}
+#ifdef USE_FFMPEG
+	if (!MediaVideoDecodeEnabled()) {
+		auBytes = 0;
+	}
+#endif
 	auto out32 = [outAddr](int offset, u32 value) {
 		Memory::WriteUnchecked_U32(value, outAddr + offset);
 	};

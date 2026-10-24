@@ -17,6 +17,9 @@
 
 
 #include "ppsspp_config.h"
+#if PPSSPP_PLATFORM(PS3)
+#include "PS3/PositionedRead.h"
+#endif
 
 #include "Common/Log.h"
 #include "Common/File/FileUtil.h"
@@ -106,7 +109,12 @@ LocalFileLoader::LocalFileLoader(const Path &filename)
 	}
 	DetectSizeFd();
 #elif !defined(_WIN32)
+#if PPSSPP_PLATFORM(PS3)
+	// PS3 has no exec-style child process inheritance or O_CLOEXEC option.
+	fd_ = open(filename.c_str(), O_RDONLY);
+#else
 	fd_ = open(filename.c_str(), O_RDONLY | O_CLOEXEC);
+#endif
 	if (fd_ == -1) {
 		ERROR_LOG(Log::FileSystem, "LocalFileLoader: failed to open file: '%s'", filename.c_str());
 		return;
@@ -189,6 +197,9 @@ size_t LocalFileLoader::ReadAt(s64 absolutePos, size_t bytes, size_t count, void
 	std::lock_guard<std::mutex> guard(readLock_);
 	File::Fseek(file_, absolutePos, SEEK_SET);
 	return fread(data, bytes, count, file_);
+#elif PPSSPP_PLATFORM(PS3)
+	// PSL1GHT has seek/read, but no pread. Serialize the pair for this fd.
+	return PS3PositionedRead(fd_, absolutePos, bytes, count, data, readLock_);
 #elif PPSSPP_PLATFORM(SWITCH)
 	// Toolchain has no fancy IO API.  We must lock.
 	std::lock_guard<std::mutex> guard(readLock_);

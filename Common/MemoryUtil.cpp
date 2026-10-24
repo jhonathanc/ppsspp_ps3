@@ -17,7 +17,7 @@
 
 #include "ppsspp_config.h"
 
-#if !PPSSPP_PLATFORM(SWITCH)
+#if !PPSSPP_PLATFORM(SWITCH) && !PPSSPP_PLATFORM(PS3)
 #include <cstring>
 #include <cstdlib>
 

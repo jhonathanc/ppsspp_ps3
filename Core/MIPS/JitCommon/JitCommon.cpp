@@ -48,6 +48,8 @@
 #include "../RiscV/RiscVJit.h"
 #elif PPSSPP_ARCH(LOONGARCH64)
 #include "../LoongArch64/LoongArch64Jit.h"
+#elif PPSSPP_ARCH(POWERPC) && defined(PPSSPP_PS3_JIT)
+#include "../PPC/PPCJit.h"
 #endif
 
 namespace MIPSComp {
@@ -118,6 +120,13 @@ namespace MIPSComp {
 		return new MIPSComp::RiscVJit(mipsState);
 #elif PPSSPP_ARCH(LOONGARCH64)
 		return new MIPSComp::LoongArch64Jit(mipsState);
+#elif PPSSPP_ARCH(POWERPC) && PPSSPP_ARCH(64BIT) && defined(PPSSPP_PS3_JIT)
+		if (MIPSComp::PPCJitAvailable()) {
+			INFO_LOG(Log::JIT, "Using the PS3 PPC JIT");
+			return new MIPSComp::PPCJit(mipsState);
+		}
+		ERROR_LOG(Log::JIT, "PS3 JIT not available, using the IR interpreter");
+		return new MIPSComp::IRInterpreterJit(mipsState);
 #else
 		// No native JIT for this architecture.
 		return new MIPSComp::IRInterpreterJit(mipsState);

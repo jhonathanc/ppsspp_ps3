@@ -18,12 +18,15 @@
 #pragma once
 
 #include "Common/CommonTypes.h"
+#include "Common/Swap.h"
 
 namespace GPURecord {
 
 struct Header {
 	char magic[8];
-	uint32_t version;
+	// Little-endian on every host (dumps from the PS3 port before Frontend 36 have it, and every
+	// other field, big-endian: playback detects and swaps those).
+	u32_le version;
 	char gameID[9];
 	uint8_t pad[3];
 };
@@ -75,8 +78,8 @@ enum class CommandType : u8 {
 
 struct Command {
 	CommandType type;
-	u32 sz;
-	u32 ptr;
+	u32_le sz;
+	u32_le ptr;
 };
 
 #pragma pack(pop)

@@ -75,16 +75,14 @@ const char *PSARCompressionToString(PSARCompression c) {
 	}
 }
 
+// PSAR fields are little-endian; read them byte by byte so big-endian hosts (the PS3) get the same
+// values. A native read there made every disc updater "Not a PSAR archive".
 static u32 ReadU32(const u8 *p) {
-	u32 value;
-	memcpy(&value, p, sizeof(value));
-	return value;
+	return (u32)p[0] | ((u32)p[1] << 8) | ((u32)p[2] << 16) | ((u32)p[3] << 24);
 }
 
 static u16 ReadU16(const u8 *p) {
-	u16 value;
-	memcpy(&value, p, sizeof(value));
-	return value;
+	return (u16)(p[0] | (p[1] << 8));
 }
 
 static PSARCompression DetectCompression(const u8 *data, size_t size) {

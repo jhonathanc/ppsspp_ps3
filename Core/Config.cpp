@@ -569,7 +569,7 @@ int Config::NextValidBackend() {
 	if (failed.count((GPUBackend)iGPUBackend)) {
 		ERROR_LOG(Log::Config, "Graphics backend failed for %d, trying another", iGPUBackend);
 
-#if !PPSSPP_PLATFORM(UWP)
+#if !PPSSPP_PLATFORM(UWP) && !PPSSPP_PLATFORM(PS3) && !defined(PPSSPP_NO_GL)
 		if (!failed.count(GPUBackend::VULKAN) && VulkanMayBeAvailable()) {
 			return (int)GPUBackend::VULKAN;
 		}
@@ -634,8 +634,13 @@ bool Config::IsBackendEnabled(GPUBackend backend) {
 	if (backend == GPUBackend::OPENGL)
 		return false;
 #endif
+#if PPSSPP_PLATFORM(PS3) || defined(PPSSPP_NO_GL)
+	if (backend == GPUBackend::VULKAN)
+		return false;
+#else
 	if (backend == GPUBackend::VULKAN && !VulkanMayBeAvailable())
 		return false;
+#endif
 	return true;
 }
 

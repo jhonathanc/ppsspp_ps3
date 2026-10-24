@@ -21,6 +21,17 @@
 
 enum GEBufferFormat : uint8_t;
 
+extern int g_displayMinVblanksPerFlip;
+extern int g_displayVideoCapFps;
+// Frame cap counters for the PS3 frontend's perf log (reset by the reader).
+struct DisplayCapStats {
+	unsigned frames;       // New frames set while the cap is on.
+	unsigned inInterrupt;  // Of those, set from an interrupt handler (can't be held there).
+	unsigned held;         // Held in sceDisplaySetFrameBuf.
+	unsigned long long heldUs;
+	unsigned waitsExtended;  // Vblank waits made longer.
+};
+extern DisplayCapStats g_displayCapStats;
 void __DisplayInit();
 void __DisplayDoState(PointerWrap &p);
 void __DisplayShutdown();
@@ -40,6 +51,10 @@ int __DisplayGetFrameTimingLimit();
 
 void Register_sceDisplay_driver();
 void __DisplayWaitForVblanks(const char* reason, int vblanks, bool callbacks = false);
+// A video frame was written (frame cap off while videos play).
+// videoPts: the picture's timestamp (90 kHz units), -1 if unknown.
+void __DisplayNoteVideoFrame(s64 videoPts = -1);
+bool __DisplayVideoPlaying();
 
 // Kinda hacky, but what can you do... we can't pass it through the jit etc.
 struct DisplayLayoutConfig;

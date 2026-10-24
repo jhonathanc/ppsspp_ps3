@@ -75,12 +75,12 @@ void PSPDialog::InitCommon() {
 		// How these compare with the calling thread decides what the game sees from GetStatus right
 		// after InitStart/ShutdownStart.
 		DEBUG_LOG(Log::sceUtility, "%s thread priorities: graphics=%d access=%d font=%d sound=%d (caller %d)",
-			UtilityDialogTypeToString(DialogType()), common->graphicsThread, common->accessThread,
-			common->fontThread, common->soundThread, KernelCurThreadPriority());
+			UtilityDialogTypeToString(DialogType()), (int)common->graphicsThread, (int)common->accessThread,
+			(int)common->fontThread, (int)common->soundThread, KernelCurThreadPriority());
 	}
 
 	if (GetCommonParam() && GetCommonParam()->language != GetPSPLanguage()) {
-		WARN_LOG(Log::sceUtility, "Game requested language %d, ignoring and using user language", GetCommonParam()->language);
+		WARN_LOG(Log::sceUtility, "Game requested language %d, ignoring and using user language", (int)GetCommonParam()->language);
 	}
 }
 
@@ -165,6 +165,11 @@ void PSPDialog::ChangeStatus(DialogStatus newStatus, int delayUs) {
 	}
 }
 
+#if PPSSPP_PLATFORM(PS3)
+// PS3 setting "Dialog memory wipe" (off by default).
+bool g_utilityWipesVolatile = false;
+#endif
+
 void PSPDialog::FinishVolatile() {
 	if (!volatileLocked_)
 		return;
@@ -172,7 +177,11 @@ void PSPDialog::FinishVolatile() {
 	if (KernelVolatileMemUnlock(0) == 0) {
 		volatileLocked_ = false;
 		// Simulate modifications to volatile memory. Not under the PS1 emulator, which keeps its heap there.
+#if PPSSPP_PLATFORM(PS3)
+		if (!PopsBootActive() && g_utilityWipesVolatile) {
+#else
 		if (!PopsBootActive()) {
+#endif
 			Memory::Memset(PSP_GetVolatileMemoryStart(), 0, PSP_GetVolatileMemoryEnd() - PSP_GetVolatileMemoryStart());
 		}
 	}

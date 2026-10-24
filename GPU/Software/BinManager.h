@@ -286,6 +286,13 @@ protected:
 #else
 	static constexpr int MAX_POSSIBLE_TASKS = 64;
 #endif
+#if PPSSPP_PLATFORM(PS3)
+	// Keep software rendering within the PPU memory budget; full queues flush sooner.
+	static constexpr int QUEUED_STATES = 512;
+	static constexpr int MAX_QUEUED_STATES = 4096;
+	static constexpr int QUEUED_CLUTS = 128;
+	static constexpr int QUEUED_PRIMS = 2048;
+#else
 	// States to start with, about 1 MB. A full ring flushes, then doubles, up to MAX_QUEUED_STATES (stateIndex is
 	// 16 bits).
 	static constexpr int QUEUED_STATES = 4096;
@@ -296,6 +303,8 @@ protected:
 	// drawing threads: with a quarter of it, it often had to wait for room.
 	static constexpr int QUEUED_PRIMS = 8192;
 
+#endif
+
 	typedef BinQueue<Rasterizer::RasterizerState, QUEUED_STATES> BinStateQueue;
 	typedef BinQueue<BinClut, QUEUED_CLUTS> BinClutQueue;
 	typedef BinQueue<BinItem, QUEUED_PRIMS> BinItemQueue;
@@ -303,7 +312,7 @@ protected:
 private:
 	BinStateQueue states_;
 	BinClutQueue cluts_;
-	uint16_t stateIndex_;
+	uint16_t stateIndex_ = 0;
 	uint16_t clutIndex_;
 	BinCoords scissor_;
 	BinItemQueue queue_;

@@ -49,6 +49,8 @@ inline int Xpose(int v) {
 //
 // Messing around with the modulo functions? try https://www.desmos.com/calculator.
 
+// Called when a VFPU function turns a number into NaN (diagnostics; null = off).
+extern void (*g_vfpuNaNHook)(const char *op, uint32_t in);
 extern float vfpu_sin(float);
 extern float vfpu_cos(float);
 extern void vfpu_sincos(float, float&, float&);

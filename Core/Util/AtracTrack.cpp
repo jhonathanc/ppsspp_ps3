@@ -1,4 +1,5 @@
 #include "Common/Log.h"
+#include "Common/Swap.h"
 #include "Common/StringUtils.h"
 #include "Core/Util/AtracTrack.h"
 #include "Core/HLE/ErrorCodes.h"
@@ -18,13 +19,13 @@ constexpr u32 WAVE_FORMAT_EXTENSIBLE = 0xFFFE;
 constexpr u32 WAVE_FORMAT_AT3 = 0x270;
 
 static u16 Read16(const u8 *buffer, int offset) {
-	u16 value;
+	u16_le value;
 	memcpy(&value, buffer + offset, sizeof(u16));
 	return value;
 }
 
 static u32 Read32(const u8 *buffer, int offset) {
-	u32 value;
+	u32_le value;
 	memcpy(&value, buffer + offset, sizeof(u32));
 	return value;
 }
@@ -49,11 +50,11 @@ int AnalyzeAtracTrack(const u8 *buffer, u32 size, Track *track, std::string *err
 	}
 
 	struct RIFFFmtChunk {
-		u16 fmtTag;
-		u16 channels;
-		u32 samplerate;
-		u32 avgBytesPerSec;
-		u16 blockAlign;
+		u16_le fmtTag;
+		u16_le channels;
+		u32_le samplerate;
+		u32_le avgBytesPerSec;
+		u16_le blockAlign;
 	};
 
 	u32 offset = 8;
@@ -348,16 +349,14 @@ int AnalyzeAA3Track(const u8 *buffer, u32 size, u32 fileSize, Track *track, std:
 }
 
 static inline u32 Read16(const u8 *base, int *offset) {
-	// Little-endian reliance.
-	u32 value = 0;
+	u16_le value;
 	memcpy(&value, base + *offset, 2);
 	*offset += 2;
 	return value;
 }
 
 static inline u32 Read32(const u8 *base, int *offset) {
-	// Little-endian reliance.
-	u32 value = 0;
+	u32_le value;
 	memcpy(&value, base + *offset, 4);
 	*offset += 4;
 	return value;

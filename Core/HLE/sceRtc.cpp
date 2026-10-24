@@ -28,6 +28,9 @@
 #include "Common/Serialize/Serializer.h"
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/TimeUtil.h"
+#if PPSSPP_PLATFORM(PS3)
+#include "PS3/TimeZone.h"
+#endif
 #include "Core/HLE/HLE.h"
 #include "Core/HLE/ErrorCodes.h"
 #include "Core/HLE/FunctionWrappers.h"
@@ -444,6 +447,12 @@ static int sceRtcConvertLocalTimeToUTC(u32 tickLocalPtr,u32 tickUTCPtr)
 		long timezone_val;
 		_get_timezone(&timezone_val);
 		srcTick -= -timezone_val * 1000000ULL;
+#elif PPSSPP_PLATFORM(PS3)
+		long offset;
+		if (!PS3::EpochLocalOffsetSeconds(&offset)) {
+			return hleLogError(Log::sceRtc, -1, "localtime_r failed");
+		}
+		srcTick -= offset * 1000000ULL;
 #elif !defined(_AIX) && !defined(__sgi) && !defined(__hpux) && !defined(HAVE_LIBNX)
 		time_t timezone = 0;
 		tm *time = localtime(&timezone);
@@ -468,6 +477,12 @@ static int sceRtcConvertUtcToLocalTime(u32 tickUTCPtr, u32 tickLocalPtr)
 		long timezone_val;
 		_get_timezone(&timezone_val);
 		srcTick += -timezone_val * 1000000ULL;
+#elif PPSSPP_PLATFORM(PS3)
+		long offset;
+		if (!PS3::EpochLocalOffsetSeconds(&offset)) {
+			return hleLogError(Log::sceRtc, -1, "localtime_r failed");
+		}
+		srcTick += offset * 1000000ULL;
 #elif !defined(_AIX) && !defined(__sgi) && !defined(__hpux) && !defined(HAVE_LIBNX)
 		time_t timezone = 0;
 		tm *time = localtime(&timezone);
@@ -991,7 +1006,7 @@ static int __RtcFormatRFC2822(u32 outPtr, u32 srcTickPtr, int tz) {
 	char *out = (char *)Memory::GetPointerWriteUnchecked(outPtr);
 	char *end = out + 32;
 	out += strftime(out, end - out, "%a, %d %b ", &local);
-	out += snprintf(out, end - out, "%04d", pt.year);
+	out += snprintf(out, end - out, "%04d", (int)pt.year);
 	out += strftime(out, end - out, " %H:%M:%S ", &local);
 	if (tz < 0)
 		out += snprintf(out, end - out, "-%02d%02d", -tz / 60, -tz % 60);
@@ -1021,7 +1036,7 @@ static int __RtcFormatRFC3339(u32 outPtr, u32 srcTickPtr, int tz) {
 
 	char *out = (char *)Memory::GetPointerWriteUnchecked(outPtr);
 	char *end = out + 32;
-	out += snprintf(out, end - out, "%04d", pt.year);
+	out += snprintf(out, end - out, "%04d", (int)pt.year);
 	out += strftime(out, end - out, "-%m-%dT%H:%M:%S.00", &local);
 	if (tz == 0)
 		out += snprintf(out, end - out, "Z");
@@ -1060,6 +1075,12 @@ static int sceRtcFormatRFC2822LocalTime(u32 outPtr, u32 srcTickPtr)
 		long timezone_val;
 		_get_timezone(&timezone_val);
 		tz_seconds = -timezone_val;
+#elif PPSSPP_PLATFORM(PS3)
+		long offset;
+		if (!PS3::EpochLocalOffsetSeconds(&offset)) {
+			return hleLogError(Log::sceRtc, -1, "localtime_r failed");
+		}
+		tz_seconds = offset;
 #elif !defined(_AIX) && !defined(__sgi) && !defined(__hpux) && !defined(HAVE_LIBNX)
 		time_t timezone = 0;
 		tm *time = localtime(&timezone);
@@ -1097,6 +1118,12 @@ static int sceRtcFormatRFC3339LocalTime(u32 outPtr, u32 srcTickPtr)
 		long timezone_val;
 		_get_timezone(&timezone_val);
 		tz_seconds = -timezone_val;
+#elif PPSSPP_PLATFORM(PS3)
+		long offset;
+		if (!PS3::EpochLocalOffsetSeconds(&offset)) {
+			return hleLogError(Log::sceRtc, -1, "localtime_r failed");
+		}
+		tz_seconds = offset;
 #elif !defined(_AIX) && !defined(__sgi) && !defined(__hpux) && !defined(HAVE_LIBNX)
 		time_t timezone = 0;
 		tm *time = localtime(&timezone);

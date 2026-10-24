@@ -93,12 +93,14 @@ static void FormatAddr(char *addrbuf, size_t bufsize, const addrinfo *info) {
 		inet_ntop(info->ai_family, &(sock_addr)->sin_addr, addrbuf, bufsize);
 		break;
 	}
+#if !PPSSPP_PLATFORM(PS3)
 	case AF_INET6: {
 		auto sock_addr = (sockaddr_in6*)info->ai_addr;
 		// There's also 'sin6_flowinfo' before 'sin6_addr', so we can't combine these cases into one.
 		inet_ntop(info->ai_family, &(sock_addr)->sin6_addr, addrbuf, bufsize);
 		break;
 	}
+#endif
 	default:
 		snprintf(addrbuf, bufsize, "(Unknown AF %d)", info->ai_family);
 		break;
@@ -114,9 +116,13 @@ bool Connection::Connect(int maxTries, double timeout, bool *cancelConnect) {
 
 	for (int tries = maxTries; tries > 0; --tries) {
 		std::vector<uintptr_t> sockets;
+#if PPSSPP_PLATFORM(PS3)
+		std::vector<pollfd> descriptors;
+#else
 		fd_set fds;
 		int maxfd = 1;
 		FD_ZERO(&fds);
+#endif
 		for (addrinfo *possible = resolved_; possible != nullptr; possible = possible->ai_next) {
 			if (possible->ai_family != AF_INET && possible->ai_family != AF_INET6)
 				continue;
@@ -127,7 +133,7 @@ bool Connection::Connect(int maxTries, double timeout, bool *cancelConnect) {
 				continue;
 			}
 			// Windows sockets aren't limited by socket number, just by count, so checking FD_SETSIZE there is wrong.
-#if !PPSSPP_PLATFORM(WINDOWS)
+#if !PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(PS3)
 			if (sock >= FD_SETSIZE) {
 				ERROR_LOG(Log::Net, "Socket doesn't fit in FD_SET: %d   We probably have a leak.", sock);
 				closesocket(sock);
@@ -156,10 +162,14 @@ bool Connection::Connect(int maxTries, double timeout, bool *cancelConnect) {
 				}
 			}
 			sockets.push_back(sock);
+#if PPSSPP_PLATFORM(PS3)
+			descriptors.push_back({sock, POLLOUT, 0});
+#else
 			FD_SET(sock, &fds);
 			if (maxfd < sock + 1) {
 				maxfd = sock + 1;
 			}
+#endif
 		}
 
 		if (sockets.empty()) {
@@ -172,7 +182,9 @@ bool Connection::Connect(int maxTries, double timeout, bool *cancelConnect) {
 			continue;
 		}
 		// There is at least 1 socket candidate.
+#if !PPSSPP_PLATFORM(PS3)
 		const fd_set allFds = fds;
+#endif
 
 		int selectResult = 0;
 		long timeoutHalfSeconds = floor(2 * timeout);
@@ -188,9 +200,13 @@ bool Connection::Connect(int maxTries, double timeout, bool *cancelConnect) {
 			}
 			--timeoutHalfSeconds;
 
+#if PPSSPP_PLATFORM(PS3)
+			selectResult = poll(descriptors.data(), (nfds_t)descriptors.size(), (int)((tv.tv_usec + 999) / 1000));
+#else
 			// select() clears the sockets that aren't ready, so each wait needs a fresh copy.
 			fds = allFds;
 			selectResult = select(maxfd, nullptr, &fds, nullptr, &tv);
+#endif
 			if (cancelConnect && *cancelConnect) {
 				WARN_LOG(Log::HTTP, "connect: cancelled (1): %s:%d", host_.c_str(), port_);
 				break;
@@ -198,12 +214,21 @@ bool Connection::Connect(int maxTries, double timeout, bool *cancelConnect) {
 		}
 		if (selectResult > 0) {
 			// Something connected.  Pick the first one that did (if multiple.)
-			for (int sock : sockets) {
+			for (size_t index = 0; index < sockets.size(); ++index) {
+				int sock = (int)sockets[index];
+#if PPSSPP_PLATFORM(PS3)
+				int socketError = 0;
+				socklen_t length = sizeof(socketError);
+				bool ready = (descriptors[index].revents & POLLOUT) && !(descriptors[index].revents & POLLNVAL) &&
+					getsockopt(sock, SOL_SOCKET, SO_ERROR, &socketError, &length) == 0 && socketError == 0;
+				if ((intptr_t)sock_ == -1 && ready) {
+#else
 				// Writable can also mean the attempt failed (refused, say).
 				int soError = 0;
 				socklen_t soErrorLen = sizeof(soError);
 				bool connected = FD_ISSET(sock, &fds) && getsockopt(sock, SOL_SOCKET, SO_ERROR, (char *)&soError, &soErrorLen) == 0 && soError == 0;
 				if ((intptr_t)sock_ == -1 && connected) {
+#endif
 					sock_ = sock;
 				} else {
 					closesocket(sock);

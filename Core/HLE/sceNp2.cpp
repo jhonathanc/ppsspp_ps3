@@ -54,7 +54,10 @@ bool NpMatching2ProcessEvents() {
 		return false;
 	}
 
-	auto& args = npMatching2Events.front();
+	auto args = npMatching2Events.front();
+	u32 callArgs[7];
+	for (int i = 0; i < 7; ++i)
+		callArgs[i] = args.data[i];
 	auto& event = args.data[0];
 	auto& stat = args.data[1];
 	auto& serverIdPtr = args.data[2];
@@ -66,16 +69,16 @@ bool NpMatching2ProcessEvents() {
 	for (std::map<int, NpMatching2Handler>::iterator it = npMatching2Handlers.begin(); it != npMatching2Handlers.end(); ++it) {
 		//if (it->first == handlerID)
 		{
-			DEBUG_LOG(Log::sceNet, "NpMatching2Callback [HandlerID=%i][EventID=%04x][State=%04x][ArgsPtr=%08x]", it->first, event, stat, it->second.argument);
-			hleEnqueueCall(it->second.entryPoint, 7, args.data);
+			DEBUG_LOG(Log::sceNet, "NpMatching2Callback [HandlerID=%i][EventID=%04x][State=%04x][ArgsPtr=%08x]", it->first, (unsigned int)event, (unsigned int)stat, it->second.argument);
+			hleEnqueueCall(it->second.entryPoint, 7, callArgs);
 		}
 	}
 
 	// Per npMatching2 function callback
-	u32* inStruct = (u32*)Memory::GetPointerOrException(inStructPtr);
+	u32_le* inStruct = (u32_le*)Memory::GetPointerOrException(inStructPtr);
 	if (Memory::IsValidAddress(inStruct[0])) {
-		DEBUG_LOG(Log::sceNet, "NpMatching2Callback [ServerID=%i][EventID=%04x][State=%04x][FuncAddr=%08x][ArgsPtr=%08x]", *(u32*)Memory::GetPointerOrException(serverIdPtr), event, stat, inStruct[0], inStruct[1]);
-		hleEnqueueCall(inStruct[0], 7, args.data);
+		DEBUG_LOG(Log::sceNet, "NpMatching2Callback [ServerID=%i][EventID=%04x][State=%04x][FuncAddr=%08x][ArgsPtr=%08x]", static_cast<u32>(*(u32_le*)Memory::GetPointerOrException(serverIdPtr)), (unsigned int)event, (unsigned int)stat, (unsigned int)inStruct[0], (unsigned int)inStruct[1]);
+		hleEnqueueCall(inStruct[0], 7, callArgs);
 	}
 	return true;
 }

@@ -784,6 +784,7 @@ static u32 sceKernelMemcpy(u32 dst, u32 src, u32 size) {
 		}
 	}
 
+	GeListWatchWrite(dst, size, "KernelMemcpy");
 	if (MemBlockInfoDetailed(size)) {
 		NotifyMemInfoCopy(dst, src, size, "KernelMemcpy/");
 	}
@@ -819,6 +820,7 @@ static u32 sysclib_memcpy(MIPSState *mips, u32 dst, u32 src, u32 size) {
 	} else if (Memory::IsValidRange(dst, size) && Memory::IsValidRange(src, size)) {
 		memcpy(Memory::GetPointerWriteUnchecked(dst), Memory::GetPointerUnchecked(src), size);
 	}
+	GeListWatchWrite(dst, size, "KernelMemcpy");
 	if (MemBlockInfoDetailed(size)) {
 		NotifyMemInfoCopy(dst, src, size, "KernelMemcpy/");
 	}
@@ -966,6 +968,7 @@ static u32 sysclib_memmove(MIPSState *mips, u32 dst, u32 src, u32 size) {
 	} else if (Memory::IsValidRange(dst, size) && Memory::IsValidRange(src, size)) {
 		memmove(Memory::GetPointerWriteUnchecked(dst), Memory::GetPointerUnchecked(src), size);
 	}
+	GeListWatchWrite(dst, size, "KernelMemmove");
 	if (MemBlockInfoDetailed(size)) {
 		NotifyMemInfoCopy(dst, src, size, "KernelMemmove/");
 	}

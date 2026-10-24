@@ -59,9 +59,9 @@ public:
 	static const char *GetStaticTypeName() { return "EventFlag"; }
 	void GetQuickInfo(char *ptr, int size) override {
 		snprintf(ptr, size, "init=%08x cur=%08x numwait=%i",
-			nef.initPattern,
-			nef.currentPattern,
-			nef.numWaitThreads);
+			(unsigned int)nef.initPattern,
+			(unsigned int)nef.currentPattern,
+			(int)nef.numWaitThreads);
 	}
 
 	static u32 GetMissingErrorCode() {

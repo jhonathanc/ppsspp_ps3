@@ -34,3 +34,19 @@ u32 RunValidateAddress(u32 pc, u32 addr, u32 isWrite) {
 			return toss(MemoryExceptionType::ALIGNMENT);
 	return 0;
 }
+
+namespace MIPSComp {
+// Store watch (diagnostics): see IRJit.cpp.
+struct StoreWatchRec {
+	u32 block;
+	u32 addr;
+	u32 value;
+	u32 kind;  // 2 = 16-bit store, 'L'/'R' = swl/swr.
+};
+static constexpr u32 STORE_WATCH_RING = 32768;
+extern bool g_irStoreWatch;
+extern StoreWatchRec *g_irStoreRing;
+extern u32 g_irStoreRingPos;
+void IRStoreWatchEnable(bool on);
+void IRStoreWatchNote(u32 addr, u32 value, u8 kind);
+}

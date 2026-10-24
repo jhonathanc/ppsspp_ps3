@@ -40,6 +40,9 @@
 #include "Core/HLE/KernelWaitHelpers.h"
 #include "GPU/GPUState.h"
 #include "GPU/GPUCommon.h"
+#include "GPU/Software/HardwareBackend.h"
+#include "GPU/PS3Profile.h"
+#include "Common/FrontendTrace.h"
 
 static const int LIST_ID_MAGIC = 0x35000000;
 
@@ -58,6 +61,24 @@ struct GeInterruptData {
 
 static std::list<GeInterruptData> ge_pending_cb;
 static int geSyncEvent;
+
+// Drawing queued on a GE worker thread (PS3) has to be done before the game learns that the GE is,
+// since it may then reuse the memory the drawing reads.
+// Waits for the GE list thread (GPUCommon::AsyncWait, PS3 setting) and does what it left to do.
+static void GeAsyncBarrier() {
+	if (gpu)
+		gpu->AsyncWait(GEASYNC_GAME_SYNC);
+}
+
+static void GeWorkerSync() {
+#if PPSSPP_ARCH(POWERPC)
+	PS3Profile::NoteGeBarrier();
+#endif
+	GeAsyncBarrier();
+	Rasterizer::NoteGeMemoryMayHaveChanged();
+	if (Rasterizer::g_hardwareBackend)
+		Rasterizer::g_hardwareBackend->Sync();
+}
 static int geInterruptEvent;
 static int geCycleEvent;
 
@@ -66,6 +87,7 @@ public:
 	GeIntrHandler() : IntrHandler(PSP_GE_INTR) {}
 
 	bool run(PendingInterrupt& pend) override {
+		GeAsyncBarrier();
 		if (ge_pending_cb.empty()) {
 			// sceGeBreak(1) got there first.  If interrupts were off, this one had already been raised.
 			DEBUG_LOG(Log::sceGe, "Ignoring GE interrupt, nothing pending anymore");
@@ -85,6 +107,7 @@ public:
 			return false;
 		}
 
+		GeWorkerSync();
 		gpu->InterruptStart(intrdata.listid);
 
 		const u32 cmd = intrdata.cmd;
@@ -146,13 +169,14 @@ public:
 		}
 
 		ge_pending_cb.pop_front();
+		Rasterizer::NoteGeMemoryMayHaveChanged();
 		gpu->InterruptEnd(intrdata.listid);
 		// Seen in GoW.
 		if (subintr >= 0) {
 			DEBUG_LOG(Log::sceGe, "Ignoring interrupt for display list %d, already been released.", intrdata.listid);
 		}
 
-		DLResult result = gpu->ProcessDLQueue();
+		DLResult result = gpu->ProcessDLQueue(true);
 		_dbg_assert_(result != DLResult::DebugBreak);
 		return false;
 	}
@@ -163,6 +187,7 @@ public:
 			ERROR_LOG(Log::sceGe, "GE interrupt finished with nothing pending");
 			return;
 		}
+		GeAsyncBarrier();
 		GeInterruptData intrdata = ge_pending_cb.front();
 		ge_pending_cb.pop_front();
 		if (!gpu->IsValidListId(intrdata.listid)) {
@@ -197,6 +222,7 @@ public:
 			break;
 		}
 
+		Rasterizer::NoteGeMemoryMayHaveChanged();
 		gpu->InterruptEnd(intrdata.listid);
 
 		// TODO: This is called from __KernelReturnFromInterrupt which does a bunch of stuff afterwards.
@@ -208,15 +234,17 @@ public:
 		if (gpu->ShouldSplitOverGe()) {
 			hleSplitSyscallOverGe();
 		} else {
-			DLResult result = gpu->ProcessDLQueue();
+			DLResult result = gpu->ProcessDLQueue(true);
 			_dbg_assert_(result != DLResult::DebugBreak);
 		}
 	}
 };
 
 static void __GeExecuteSync(u64 userdata, int cyclesLate) {
+	GeAsyncBarrier();
 	int listid = userdata >> 32;
 	GPUSyncType type = (GPUSyncType) (userdata & 0xFFFFFFFF);
+	GeWorkerSync();
 	bool wokeThreads = __GeTriggerWait(type, listid);
 	gpu->SyncEnd(type, listid, wokeThreads);
 }
@@ -297,9 +325,27 @@ void __GeDoState(PointerWrap &p) {
 void __GeShutdown() {
 }
 
+// Video diagnostics (sceMpeg's once-a-second line): GE syncs scheduled and thread waits for them.
+GeVideoStats g_geVideoStats;
+
 bool __GeTriggerSync(GPUSyncType type, int id, u64 atTicks) {
 	u64 userdata = (u64)id << 32 | (u64)type;
 	s64 future = atTicks - CoreTiming::GetTicks(currentMIPS);
+	{
+		const s64 us = future > 0 ? cyclesToUs(future) : 0;
+		g_geVideoStats.syncs++;
+		g_geVideoStats.syncAheadUs += us;
+		if (us > g_geVideoStats.syncAheadMaxUs)
+			g_geVideoStats.syncAheadMaxUs = us;
+		// Build 205: where a sync far in the future comes from (Midnight Club L.A.'s intro has every
+		// other one 206 ms ahead, though its list runs take almost no GE time).
+		static int farLogs = 0;
+		if (us > 50000 && farLogs < 40 && FrontendLogOn(FrontendLog::VIDEO)) {
+			farLogs++;
+			FrontendTrace("GE sync far ahead: %s sync %d due in %.1f ms; %s", type == GPU_SYNC_DRAW ? "draw" : "list", id, us / 1000.0,
+				gpu ? gpu->RunSoFarText().c_str() : "no GPU");
+		}
+	}
 	if (type == GPU_SYNC_DRAW) {
 		s64 left = CoreTiming::UnscheduleEvent(geSyncEvent, userdata);
 		if (left > future)
@@ -349,6 +395,8 @@ void __GeWaitCurrentThread(GPUSyncType type, SceUID waitId, const char *reason) 
 		ERROR_LOG_REPORT(Log::sceGe, "__GeWaitCurrentThread: bad wait type");
 		return;
 	}
+	g_geVideoStats.waits++;
+	g_geVideoStats.waitStart[__KernelGetCurThread()] = CoreTiming::GetTicks(currentMIPS);
 
 	__KernelWaitCurThread(waitType, waitId, 0, 0, false, reason);
 }
@@ -356,8 +404,18 @@ void __GeWaitCurrentThread(GPUSyncType type, SceUID waitId, const char *reason) 
 static bool __GeTriggerWait(WaitType waitType, SceUID waitId, WaitingThreadList &waitingThreads) {
 	// TODO: Do they ever get a result other than 0?
 	bool wokeThreads = false;
-	for (int threadID : waitingThreads)
+	for (int threadID : waitingThreads) {
+		auto it = g_geVideoStats.waitStart.find(threadID);
+		if (it != g_geVideoStats.waitStart.end()) {
+			const s64 us = cyclesToUs(CoreTiming::GetTicks(currentMIPS) - it->second);
+			g_geVideoStats.waitedUs += us;
+			if (us > g_geVideoStats.waitedMaxUs)
+				g_geVideoStats.waitedMaxUs = us;
+			g_geVideoStats.woken++;
+			g_geVideoStats.waitStart.erase(it);
+		}
 		wokeThreads |= HLEKernel::ResumeFromWait(threadID, waitType, waitId, 0);
+	}
 	waitingThreads.clear();
 	gstate_c.textureSyncTimeDomain++;
 	gpuStats.perFrame.numGEInterrupts++;
@@ -405,6 +463,8 @@ static int __GeSubIntrBase(int callbackId) {
 }
 
 u32 sceGeListEnQueue(MIPSState *mips, u32 listAddress, u32 stallAddress, int callbackId, u32 optParamAddr) {
+	GeAsyncBarrier();
+	Rasterizer::NoteGeMemoryMayHaveChanged();
 	auto optParam = PSPPointer<PspGeListArgs>::Create(optParamAddr);
 
 	bool runList;
@@ -415,7 +475,7 @@ u32 sceGeListEnQueue(MIPSState *mips, u32 listAddress, u32 stallAddress, int cal
 		if (gpu->ShouldSplitOverGe()) {
 			hleSplitSyscallOverGe();
 		} else {
-			gpu->ProcessDLQueue();
+			gpu->ProcessDLQueue(true);
 		}
 	}
 	hleEatCycles(490);
@@ -427,6 +487,8 @@ u32 sceGeListEnQueue(MIPSState *mips, u32 listAddress, u32 stallAddress, int cal
 }
 
 u32 sceGeListEnQueueHead(MIPSState *mips, u32 listAddress, u32 stallAddress, int callbackId, u32 optParamAddr) {
+	GeAsyncBarrier();
+	Rasterizer::NoteGeMemoryMayHaveChanged();
 	DEBUG_LOG(Log::sceGe,
 		"sceGeListEnQueueHead(addr=%08x, stall=%08x, cbid=%08x, param=%08x) ticks=%lld",
 		listAddress, stallAddress, callbackId, optParamAddr, (long long)CoreTiming::GetTicks(mips));
@@ -440,7 +502,7 @@ u32 sceGeListEnQueueHead(MIPSState *mips, u32 listAddress, u32 stallAddress, int
 		if (gpu->ShouldSplitOverGe()) {
 			hleSplitSyscallOverGe();
 		} else {
-			gpu->ProcessDLQueue();
+			gpu->ProcessDLQueue(true);
 		}
 	}
 	hleEatCycles(480);
@@ -449,6 +511,7 @@ u32 sceGeListEnQueueHead(MIPSState *mips, u32 listAddress, u32 stallAddress, int
 }
 
 static int sceGeListDeQueue(u32 listID) {
+	GeAsyncBarrier();
 	WARN_LOG(Log::sceGe, "sceGeListDeQueue(%08x)", listID);
 	int result = gpu->DequeueList(LIST_ID_MAGIC ^ listID);
 	hleReSchedule("dlist dequeued");
@@ -456,27 +519,47 @@ static int sceGeListDeQueue(u32 listID) {
 }
 
 static int sceGeListUpdateStallAddr(u32 displayListID, u32 stallAddress) {
+	GeAsyncBarrier();
+	// (No texture recheck here: games append draws this way, often one per draw, and write back the
+	// data cache - noted by range - for anything the GE must see.)
 	// Advance() might cause an interrupt, so defer the Advance but do it ASAP.
 	// Final Fantasy Type-0 has a graphical artifact without this (timing issue.)
 	hleEatCycles(190);
-	hleCoreTimingForceCheck();
 
 	DEBUG_LOG(Log::sceGe, "sceGeListUpdateStallAddr(dlid=%i, stalladdr=%08x)", displayListID, stallAddress);
 	bool runList;
-	int retval = gpu->UpdateStall(LIST_ID_MAGIC ^ displayListID, stallAddress, &runList);
+	const int listID = LIST_ID_MAGIC ^ displayListID;
+	int retval = gpu->UpdateStall(listID, stallAddress, &runList);
+	bool forceCheck = true;
 	if (runList) {
 		if (gpu->ShouldSplitOverGe()) {
 			hleSplitSyscallOverGe();
 		} else {
-			gpu->ProcessDLQueue();
+			gpu->ProcessDLQueue(true);
+			// Games that add one draw at a time (Dead to Rights, Gran Turismo: thousands of calls a
+			// frame) only need the CoreTiming check when the list got to an end or a signal; events
+			// the processing schedules shorten the slice themselves (CoreTiming::ScheduleEvent).
+			// (With the GE list thread working on it, reading the list would wait for it.)
+			if (listID >= 0 && listID < 64 && !gpu->AsyncBusy()) {  // GPUCommon::DisplayListMaxCount
+				const DisplayList &dl = gpu->GetDisplayList(listID);
+				forceCheck = dl.state != PSP_GE_DL_STATE_RUNNING || dl.pendingInterrupt || dl.signal != PSP_GE_SIGNAL_NONE;
+			}
 		}
 	}
+	// Advance() might cause an interrupt, so defer the Advance but do it ASAP.
+	// Final Fantasy Type-0 has a graphical artifact without this (timing issue.)
+	if (forceCheck)
+		hleCoreTimingForceCheck();
 	return hleNoLog(retval);
 }
 
 // 0 : wait for completion. 1:check and return
 int sceGeListSync(u32 displayListID, u32 mode) {
 	hleEatCycles(220);  // Fudged without measuring, copying sceGeContinue.
+	// "Don't wait" hack (PS3 setting): the game goes on as if the lists were done.
+	if (g_geAsyncNoSyncWait && mode == 0 && gpu && gpu->AsyncBusy())
+		return hleLogDebug(Log::sceGe, 0);
+	GeWorkerSync();
 	gstate_c.textureSyncTimeDomain++;
 	return hleLogDebug(Log::sceGe, gpu->ListSync(LIST_ID_MAGIC ^ displayListID, mode));
 }
@@ -487,6 +570,9 @@ static u32 sceGeDrawSync(u32 mode) {
 		hleEatCycles(500000); //HACK(?) : Potential fix for Crash Tag Team Racing and a few Gundam games
 	else if (!PSP_CoreParameter().compat.flags().DrawSyncInstant)
 		hleEatCycles(1240);
+	if (g_geAsyncNoSyncWait && mode == 0 && gpu && gpu->AsyncBusy())
+		return hleLogDebug(Log::sceGe, 0);
+	GeWorkerSync();
 	gstate_c.textureSyncTimeDomain++;
 	u32 result = gpu->DrawSync(mode);
 	if (mode == 0 && PSP_CoreParameter().compat.flags().ColorPickingDrawSyncReadback) {
@@ -501,6 +587,8 @@ static u32 sceGeDrawSync(u32 mode) {
 }
 
 static int sceGeContinue() {
+	GeAsyncBarrier();
+	Rasterizer::NoteGeMemoryMayHaveChanged();
 	bool runList;
 	int ret = gpu->Continue(&runList);
 	if (runList) {
@@ -516,6 +604,7 @@ static int sceGeContinue() {
 }
 
 static int sceGeBreak(u32 mode, u32 unknownPtr) {
+	GeAsyncBarrier();
 	if (mode > 1) {
 		return hleLogWarning(Log::sceGe, SCE_KERNEL_ERROR_INVALID_MODE, "invalid mode");
 	}
@@ -594,6 +683,7 @@ static int sceGeUnsetCallback(u32 cbID) {
 // Points to 512 32-bit words, where we can probably layout the context however we want
 // unless some insane game pokes it and relies on it...
 u32 sceGeSaveContext(u32 ctxAddr) {
+	GeAsyncBarrier();
 	if (gpu->BusyDrawing()) {
 		// Real error code.
 		return hleLogWarning(Log::sceGe, -1, "lists in process, aborting");
@@ -610,6 +700,7 @@ u32 sceGeSaveContext(u32 ctxAddr) {
 }
 
 u32 sceGeRestoreContext(u32 ctxAddr) {
+	GeAsyncBarrier();
 	if (gpu->BusyDrawing()) {
 		return hleLogWarning(Log::sceGe, SCE_KERNEL_ERROR_BUSY, "lists in process, aborting");
 	}
@@ -623,6 +714,7 @@ u32 sceGeRestoreContext(u32 ctxAddr) {
 }
 
 static int sceGeGetMtx(int type, u32 matrixPtr) {
+	GeAsyncBarrier();
 	int size = type == GE_MTX_PROJECTION ? 16 : 12;
 	if (!Memory::IsValidRange(matrixPtr, size * sizeof(float))) {
 		return hleLogError(Log::sceGe, -1, "bad matrix ptr");
@@ -638,6 +730,7 @@ static int sceGeGetMtx(int type, u32 matrixPtr) {
 }
 
 static u32 sceGeGetCmd(int cmd) {
+	GeAsyncBarrier();
 	if (cmd >= 0 && cmd < (int)ARRAY_SIZE(gstate.cmdmem)) {
 		// Does not mask away the high bits.  But matrix regs don't read back.
 		u32 val = gstate.cmdmem[cmd];
@@ -670,10 +763,12 @@ static u32 sceGeGetCmd(int cmd) {
 }
 
 static int sceGeGetStack(int index, u32 stackPtr) {
+	GeAsyncBarrier();
 	return hleReportWarning(Log::sceGe, gpu->GetStack(index, stackPtr));
 }
 
 static u32 sceGeEdramSetAddrTranslation(u32 new_size) {
+	GeAsyncBarrier();
 	bool outsideRange = new_size != 0 && (new_size < 0x200 || new_size > 0x1000);
 	bool notPowerOfTwo = (new_size & (new_size - 1)) != 0;
 	if (outsideRange || notPowerOfTwo) {

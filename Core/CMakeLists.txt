@@ -85,6 +85,22 @@ list(APPEND CoreExtra
 	MIPS/RiscV/RiscVVfpuDot.h
 )
 
+if(PPC_JIT_LINUX_TEST OR RSX_HOSTSIM_INCLUDE)
+	# Test build of the PS3 PPC JIT on ppc64 Linux (qemu), or its compiler in the desktop host test build.
+	list(APPEND CoreExtra ../PS3/jit/PPCJitMemoryLinux.cpp)
+endif()
+
+if(PS3_PSL1GHT OR PPC_JIT_LINUX_TEST OR RSX_HOSTSIM_INCLUDE)
+list(APPEND CoreExtra
+	MIPS/PPC/PPCAsm.cpp
+	MIPS/PPC/PPCComp.cpp
+	MIPS/PPC/PPCJit.cpp
+	MIPS/PPC/PPCJit.h
+	MIPS/PPC/PPCRegCache.cpp
+	MIPS/PPC/PPCRegCache.h
+)
+endif()
+
 list(APPEND CoreExtra
 	MIPS/LoongArch64/LoongArch64Asm.cpp
 	MIPS/LoongArch64/LoongArch64CompALU.cpp
@@ -722,6 +738,14 @@ if(LIBRETRO)
 endif()
 
 set(CoreExtraLibs)
+if(PS3_PSL1GHT)
+	target_sources(Core PRIVATE ../PS3/jit/PS3JitMemory.cpp)
+endif()
+
+if(PS3_PSL1GHT OR PPSSPP_PS3_SAS_TESTS)
+	target_sources(Core PRIVATE HW/SasSpu.cpp HW/SasSpu.h HW/SasMixKernel.h)
+endif()
+
 if(ANDROID)
 	list(APPEND CoreExtraLibs android)
 	if(X86_64)
@@ -729,7 +753,9 @@ if(ANDROID)
 	endif()
 endif()
 
-list(APPEND CoreExtraLibs armips)
+if(NOT PS3)
+	list(APPEND CoreExtraLibs armips)
+endif()
 
 target_link_libraries(Core GPU Common chdr kirk cityhash sfmt19937 xbrz xxhash libdeflate rcheevos at3_standalone lua
 	aemu_postoffice_client ${CoreExtraLibs} ${CMAKE_DL_LIBS})

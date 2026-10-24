@@ -1,5 +1,9 @@
 #pragma once
 
+#if defined(__PSL1GHT__) && defined(__PS3_SONY_SDK__)
+#error "Select one PS3 SDK: PSL1GHT or Sony"
+#endif
+
 // This file is included by C, C++ and ASM files
 // So do not output any token!
 
@@ -85,6 +89,16 @@
         #define PPSSPP_ARCH_LOONGARCH64_LSX  1
     #endif
 #endif
+// PowerPC CPU width and pointer width can differ (for example on the PS3 PPU).
+#if defined(__powerpc__) || defined(__powerpc64__) || defined(__ppc__) || defined(__PPC__)
+    #define PPSSPP_ARCH_POWERPC 1
+    #if defined(__SIZEOF_POINTER__) && __SIZEOF_POINTER__ == 8
+        #define PPSSPP_ARCH_64BIT 1
+    #else
+        #define PPSSPP_ARCH_32BIT 1
+    #endif
+#endif
+
 // PLATFORM defines
 #if defined(_WIN32)
     // Covers both 32 and 64bit Windows
@@ -120,6 +134,8 @@
 #elif defined(__ANDROID__)
     #define PPSSPP_PLATFORM_ANDROID 1
     #define PPSSPP_PLATFORM_LINUX 1
+#elif defined(__PS3__)
+    #define PPSSPP_PLATFORM_PS3 1
 #elif defined(__linux__)
     #define PPSSPP_PLATFORM_LINUX 1
 #elif defined(__OpenBSD__)
@@ -133,7 +149,7 @@
 #else
 #define PPSSPP_API_ANY_GL 1
 #endif
-#elif PPSSPP_PLATFORM(IOS) && !defined(__LIBRETRO__)
+#elif (PPSSPP_PLATFORM(IOS) && !defined(__LIBRETRO__)) || PPSSPP_PLATFORM(PS3) || defined(PPSSPP_NO_GL)
 // No GL
 #else
 // All other platforms support GL.

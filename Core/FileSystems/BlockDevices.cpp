@@ -890,14 +890,14 @@ NPDRMDemoBlockDevice::NPDRMDemoBlockDevice(FileLoader *fileLoader)
 	sceDrmBBCipherUpdate(&kirk_, &ckey, np_header+0x40, 0x60);
 	sceDrmBBCipherFinal(&ckey);
 
-	u32 lbaStart = *(u32*)(np_header+0x54); // LBA start
-	u32 lbaEnd   = *(u32*)(np_header+0x64); // LBA end
+	u32 lbaStart = kirk_read32le(np_header+0x54); // LBA start
+	u32 lbaEnd   = kirk_read32le(np_header+0x64); // LBA end
 	if (lbaEnd < lbaStart) {
 		errorString_ = "Bad LBA range in header";
 		return;
 	}
 	lbaSize_     = (lbaEnd - lbaStart + 1); // LBA size of ISO
-	blockLBAs_   = *(u32*)(np_header+0x0c); // block size in LBA
+	blockLBAs_   = kirk_read32le(np_header+0x0c); // block size in LBA
 
 	char psarStr[5]{};
 	memcpy(psarStr, &psar_id, 4);
@@ -918,7 +918,7 @@ NPDRMDemoBlockDevice::NPDRMDemoBlockDevice(FileLoader *fileLoader)
 	blockBuf_ = new u8[blockSize_];
 	tempBuf_  = new u8[blockSize_];
 
-	tableOffset_ = *(u32*)(np_header + 0x6c); // table offset
+	tableOffset_ = kirk_read32le(np_header+0x6c); // table offset
 	if (tableOffset_ > fileLoader_->FileSize()) {
 		errorString_ = "Invalid table offset";
 		return;

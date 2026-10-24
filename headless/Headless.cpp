@@ -14,7 +14,11 @@
 //
 // NOTE: In MSVC, don't forget to set the working directory to $ProjectDir\.. in debug settings.
 
+#include "Common/FrontendTrace.h"
 #include "ppsspp_config.h"
+#if defined(PPSSPP_PS3_FRONTEND)
+#include "PS3/frontend/Frontend.h"
+#endif
 #include <cstdio>
 #include <cstdlib>
 #include <limits>
@@ -57,6 +61,9 @@
 #include "Core/Config.h"
 #include "Core/ConfigValues.h"
 #include "Core/Core.h"
+#include "Core/MIPS/JitCommon/JitCommon.h"
+#include "GPU/PS3Profile.h"
+#include "Core/FrameTiming.h"
 #include "Core/CoreTiming.h"
 #include "Core/EmuThread.h"
 #include "Core/HLE/HLE.h"
@@ -71,6 +78,13 @@
 #include "Core/HLE/sceUtility.h"
 #include "Core/SaveState.h"
 #include "GPU/GPUCommon.h"
+#include "GPU/Debugger/Record.h"
+#include "Core/MIPS/IR/IRInterpreter.h"
+#include "Core/MIPS/IR/IRNativeCommon.h"
+#include "Core/MIPS/PPC/PPCBuild.h"
+#if defined(PPSSPP_PPC_JIT_BUILD)
+#include "Core/MIPS/PPC/PPCJit.h"
+#endif
 #include "GPU/Common/FramebufferManagerCommon.h"
 #include "Common/Log.h"
 #include "Common/Log/LogManager.h"
@@ -147,7 +161,14 @@ int64_t System_GetPropertyInt(SystemProperty prop) {
 		return 31;
 	return -1;
 }
-float System_GetPropertyFloat(SystemProperty prop) { return -1.0f; }
+float System_GetPropertyFloat(SystemProperty prop) {
+#if defined(PPSSPP_PS3_FRONTEND)
+	// The PS3 frontend presents through a 59.94 Hz display; frame pacing needs a real rate.
+	if (prop == SYSPROP_DISPLAY_REFRESH_RATE)
+		return 59.94f;
+#endif
+	return -1.0f;
+}
 bool System_GetPropertyBool(SystemProperty prop) {
 	switch (prop) {
 	case SYSPROP_IS_HEADLESS: return true;
@@ -169,7 +190,14 @@ void System_AskForPermission(SystemPermission permission) {}
 PermissionStatus System_GetPermissionStatus(SystemPermission permission) { return PERMISSION_STATUS_GRANTED; }
 void System_AudioGetDebugStats(char *buf, size_t bufSize) { if (buf) buf[0] = '\0'; }
 void System_AudioClear() {}
+#if defined(PPSSPP_PS3_FRONTEND)
+#include "PS3/frontend/Audio.h"
+void System_AudioPushSamples(const s32 *audio, int numSamples, float volume) {
+	PS3Audio::Push(audio, numSamples, volume);
+}
+#else
 void System_AudioPushSamples(const s32 *audio, int numSamples, float volume) {}
+#endif
 bool System_MakeRequest(SystemRequestType type, int requestId, const std::string &param1, const std::string &param2, int64_t param3, int64_t param4) { return false; }
 
 // TODO: To avoid having to define these here, these should probably be turned into system "requests".
@@ -459,6 +487,10 @@ static void EndDrawFrame(Draw::DrawContext *draw) {
 	}
 }
 
+#if PPSSPP_ARCH(POWERPC) && !PPSSPP_PLATFORM(PS3)
+namespace MIPSComp { int PPCBlockVerify(const char *path, int trials); }
+#endif
+
 static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &coreParameter, const AutoTestOptions &opt) {
 	using namespace Draw;
 
@@ -474,7 +506,13 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 		coreParameter.collectDebugOutput = &output;
 	}
 
+#if defined(PPSSPP_PS3_FRONTEND)
+	PS3Frontend::Trace("PSP_InitStart entered");
+#endif
 	if (!PSP_InitStart(coreParameter)) {
+#if defined(PPSSPP_PS3_FRONTEND)
+		PS3Frontend::Trace("PSP_InitStart rejected the game");
+#endif
 		// Shouldn't really happen anymore, the errors happen later in PSP_InitUpdate.
 		fprintf(stderr, "Failed to start '%s'.\n", coreParameter.fileToStart.c_str());
 		printf("TESTERROR\n");
@@ -487,13 +525,22 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 	}
 
 	std::string error_string;
+#if defined(PPSSPP_PS3_FRONTEND)
+	PS3Frontend::Trace("Updating PSP boot initialization");
+#endif
 	while (PSP_InitUpdate(&error_string) == BootState::Booting) {
+#if defined(PPSSPP_PS3_FRONTEND)
+		PS3Frontend::Pump(false);
+#endif
 		sleep_ms(1, "auto-test");
 	}
 
 	if (!PSP_IsInited()) {
 		// Without this, a failed boot outside --compare printed nothing and exited 0.
 		fprintf(stderr, "Failed to boot '%s': %s\n", coreParameter.fileToStart.c_str(), error_string.c_str());
+#if defined(PPSSPP_PS3_FRONTEND)
+		PS3Frontend::Trace("PSP initialization failed: %s", error_string.c_str());
+#endif
 		GitHubActionsPrint("error", "Test init failed for %s", currentTestName.c_str());
 		g_bootFailed = true;
 		return false;
@@ -522,9 +569,20 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 		return false;
 	}
 
+#if defined(PPSSPP_PS3_FRONTEND)
+	PS3Frontend::Trace("PSP initialized; entering emulation loop");
+	// Boot tracing writes and fsyncs several files per call; keep it off while the game runs.
+	PS3Frontend::DisableThreadDiagnostics();
+#endif
 	System_Notify(SystemNotification::BOOT_DONE);
 
+#if defined(PPSSPP_PS3_FRONTEND)
+	// GE timing for the frame-time breakdown. Only collected when the overlay/profiling asks,
+	// since it also times every HLE call.
+	PSP_UpdateDebugStats(PS3Frontend::GetSettings().collectStats);
+#else
 	PSP_UpdateDebugStats((DebugOverlay)g_Config.iDebugOverlay == DebugOverlay::DEBUG_STATS || g_Config.bLogFrameDrops);
+#endif
 
 	if (gpu) {
 		gpu->BeginHostFrame(g_Config.GetDisplayLayoutConfig(DeviceOrientation::Landscape));
@@ -558,6 +616,14 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 	double statsStart = -1.0;
 	int statsLastFlips = 0;
 	std::vector<std::pair<double, Path>> screenshotsAt = opt.screenshotsAt;
+#if PPSSPP_ARCH(POWERPC) && !PPSSPP_PLATFORM(PS3)
+	// PPC test builds: PPC_BLOCKVERIFY=<file> checks the JIT's code for one block against the IR
+	// interpreter (see PPCBlockVerify), then exits.
+	if (const char *verify = getenv("PPC_BLOCKVERIFY")) {
+		const int bad = MIPSComp::PPCBlockVerify(verify, getenv("PPC_BLOCKVERIFY_TRIALS") ? atoi(getenv("PPC_BLOCKVERIFY_TRIALS")) : 200);
+		exit(bad == 0 ? 0 : 1);
+	}
+#endif
 	coreState = coreParameter.startBreak ? CORE_STEPPING_CPU : CORE_RUNNING_CPU;
 
 	// The XMB starting a game, or a game going back to it: boot that, the way the app does, and keep
@@ -635,6 +701,9 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 			});
 		}
 
+#if defined(PPSSPP_PS3_FRONTEND)
+		if (!PS3Frontend::Pump(true)) break;
+#endif
 		// Overlapping presses don't release each other's buttons.
 		if (!opt.presses.empty()) {
 			u32 held = 0, released = 0;
@@ -657,6 +726,54 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 		// Finer steps when input is scripted, so short presses land.
 		int blockTicks = (int)usToCycles(1000000 / (opt.presses.empty() ? 10 : 60));
 		PSP_RunLoopFor(blockTicks);
+#if !PPSSPP_PLATFORM(PS3)
+		{
+			// Test builds: PPSSPP_RECORD_DUMP=N asks for a GE dump after N run slices (the recorder
+			// works on the PS3 the same way; this is how its file format is checked on a PC).
+			static const int recordAt = getenv("PPSSPP_RECORD_DUMP") ? atoi(getenv("PPSSPP_RECORD_DUMP")) : -1;
+			static int recordSlices = 0;
+			static bool storeWatchInit = false;
+			if (!storeWatchInit && getenv("PPSSPP_STOREWATCH")) {
+				storeWatchInit = true;
+				extern void (*g_storeWatchReport)(const char *text);
+				MIPSComp::IRStoreWatchEnable(true);
+				g_storeWatchReport = [](const char *text) { fprintf(stderr, "%s\n", text); };
+			}
+			if (recordAt >= 0 && recordSlices == recordAt && getenv("PPSSPP_DUMP_LIMIT")) {
+				GPURecord::g_dumpByteLimit = (size_t)atoi(getenv("PPSSPP_DUMP_LIMIT"));
+				GPURecord::g_dumpDroppedHook = [](u32 bytes) { fprintf(stderr, "GE dump dropped at %u bytes\n", bytes); };
+			}
+			if (recordAt >= 0 && recordSlices == recordAt && getenv("PPSSPP_DUMP_TIME")) {
+				// The time limit (seconds) after which a recording is given up.
+				GPURecord::g_dumpTimeLimit = atof(getenv("PPSSPP_DUMP_TIME"));
+				GPURecord::g_dumpAbandonedHook = [](double seconds, u32 bytes) { fprintf(stderr, "GE dump given up after %.3f s at %u bytes\n", seconds, bytes); };
+			}
+			// PPSSPP_RECORD_REPLAY: the dump being played may be recorded again (checks the recorder).
+			if (recordAt >= 0 && getenv("PPSSPP_RECORD_REPLAY"))
+				GPURecord::g_dumpRecordReplays = true;
+			if (recordAt >= 0 && recordSlices++ == recordAt && gpu) {
+				const bool asked = gpu->GetRecorder()->RecordNextFrame([](const Path &path) {
+					fprintf(stderr, "GE dump saved: %s\n", path.c_str());
+				});
+				fprintf(stderr, "GE dump: %s\n", asked ? "recording the next frame" : "refused");
+			}
+		}
+		{
+			// Test builds: PPSSPP_JIT_CLEAR_EVERY=N clears the JIT cache every N slices (as the PS3
+			// frontend's JIT sampling does between slices).
+			static const int clearEvery = getenv("PPSSPP_JIT_CLEAR_EVERY") ? atoi(getenv("PPSSPP_JIT_CLEAR_EVERY")) : 0;
+			static int slices = 0;
+			if (clearEvery > 0 && ++slices % clearEvery == 0 && currentMIPS->jit) {
+#if PPSSPP_ARCH(POWERPC)
+				// PPSSPP_JIT_CLEAR_PROFILE: every other clear compiles with the block counters on.
+				static const bool prof = getenv("PPSSPP_JIT_CLEAR_PROFILE") != nullptr;
+				if (prof)
+					PS3Profile::jitBlockProfile = !PS3Profile::jitBlockProfile;
+#endif
+				currentMIPS->jit->ClearCache();
+			}
+		}
+#endif
 
 		// If we were rendering, this might be a nice time to do something about it.
 		if (coreState == CORE_NEXTFRAME) {
@@ -675,6 +792,11 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 			if (gpu) {
 				gpu->EndHostFrame();
 			}
+#if defined(PPSSPP_PS3_FRONTEND)
+			PS3Frontend::Present();
+			// Speed limiting: DoFrameTiming defers its sleep to here, after the frame is handed off.
+			g_frameTiming.PostSubmit();
+#endif
 			if (draw) {
 				EndDrawFrame(draw);
 				draw->BeginFrame(Draw::DebugFlags::NONE);
@@ -745,6 +867,16 @@ static bool RunAutoTest(GraphicsContext *graphicsContext, CoreParameter &corePar
 		}
 
 		EndDrawFrame(draw);
+	}
+
+	// Test builds: PPSSPP_PEEK=<hex addr>[,<count>] prints words of PSP memory (VRAM too) at the end.
+	if (const char *peek = getenv("PPSSPP_PEEK")) {
+		u32 addr = (u32)strtoul(peek, nullptr, 16);
+		const char *comma = strchr(peek, ',');
+		int count = comma ? atoi(comma + 1) : 1;
+		for (int i = 0; i < count; ++i)
+			if (Memory::IsValidAddress(addr + i * 4))
+				fprintf(stderr, "PEEK %08x: %08x\n", addr + i * 4, Memory::ReadUnchecked_U32(addr + i * 4));
 	}
 
 	PSP_Shutdown(true);
@@ -839,6 +971,10 @@ int RunTests(GraphicsContext *graphicsContext, CoreParameter &coreParameter, con
 			printf("%s:\n", coreParameter.fileToStart.c_str());
 		}
 		const bool passed = RunAutoTest(graphicsContext, coreParameter, testOptions);
+#ifdef PPSSPP_PS3_FRONTEND
+		if (!passed && !testOptions.compare && g_comparisonScreenshot.empty())
+			failedTests.push_back(testFilenames[i]);
+#endif
 		if (testOptions.bench) {
 			double st = time_now_d();
 			// Benchmarking repeats the run, so budget it in real seconds regardless of what the run
@@ -897,14 +1033,64 @@ public:
 	}
 };
 
-#if PPSSPP_PLATFORM(IOS)
+#if defined(PPSSPP_PS3_FRONTEND)
+int PS3EmulatorMain(int argc, const char* argv[]) {
+#elif PPSSPP_PLATFORM(IOS)
 // An iOS app can't be a bare executable: ios/HeadlessMain.mm starts UIKit and calls this.
 int HeadlessMain(int argc, const char* argv[]) {
 #else
 int main(int argc, const char* argv[]) {
 #endif
+	// Frontend log lines (Sound debug, RSX events...) to stderr, for tests: PPSSPP_FRONTENDTRACE=<mask>.
+	if (getenv("PPSSPP_FRONTENDTRACE")) {
+		g_frontendLogMask = (unsigned)strtoul(getenv("PPSSPP_FRONTENDTRACE"), nullptr, 0);
+		g_frontendTraceHook = [](const char *text) { fprintf(stderr, "%s\n", text); };
+	}
 	PROFILE_INIT();
 	TimeInit();
+	// Test builds: PPSSPP_MIPSDIS=<ram file>,<hex addr>,<count> disassembles a RAM dump (from 0x08000000) and exits.
+	if (const char *md = getenv("PPSSPP_MIPSDIS")) {
+		char path[512]; unsigned addr = 0, cnt = 0;
+		if (sscanf(md, "%511[^,],%x,%u", path, &addr, &cnt) == 3) {
+			FILE *f = fopen(path, "rb");
+			if (f) {
+				fseek(f, addr - 0x08000000, SEEK_SET);
+				for (unsigned k = 0; k < cnt; ++k) {
+					u32 w;
+					if (fread(&w, 4, 1, f) != 1) break;
+					char buf[256];
+					if ((w >> 24) == 0x68) snprintf(buf, sizeof(buf), "<block start: first instruction lost>");
+					else MIPSDisAsm(MIPSOpcode(w), addr + k * 4, buf, sizeof(buf), true);
+					printf("%08x: %08x  %s\n", addr + k * 4, w, buf);
+				}
+				fclose(f);
+			}
+		}
+		return 0;
+	}
+#if defined(PPSSPP_PPC_JIT_BUILD)
+	// Test builds: PPSSPP_JITGENERIC=<groups> (the PS3's per-game "jitgeneric").
+	if (const char *jg = getenv("PPSSPP_JITGENERIC"))
+		MIPSComp::g_irNativeGenericMask = (uint32_t)atoi(jg);
+	// PPSSPP_JITOPS=<IR op names> (the PS3's per-game "jitops").
+	if (const char *jo = getenv("PPSSPP_JITOPS")) {
+		atexit([]() { fprintf(stderr, "JITOPS: %u instructions compiled as interpreter calls\n", MIPSComp::g_irNativeGenericOpCount); });
+		InitIR();  // The op names table is filled when the JIT starts: not yet here.
+		std::string list = std::string(jo) + ",", token;
+		for (char ch : list) {
+			if (ch == ',' || ch == ' ') {
+				for (int op = 0; op < 256 && !token.empty(); ++op) {
+					const IRMeta *meta = GetIRMeta((IROp)op);
+					if (meta && meta->name && token == meta->name)
+						MIPSComp::g_irNativeGenericOp[op] = true;
+				}
+				token.clear();
+			} else {
+				token += ch;
+			}
+		}
+	}
+#endif
 #if PPSSPP_PLATFORM(WINDOWS)
 	if (!IsDebuggerPresent()) {
 		SetCleanExitOnAssert();
@@ -1023,6 +1209,15 @@ int main(int argc, const char* argv[]) {
 		// Only with --log, add the printfLogger.
 		g_logManager.EnableOutput(LogOutput::Printf);
 	}
+#if defined(PPSSPP_PS3_FRONTEND)
+	// The frontend passes --log for both of its logging levels; "warnings" keeps the log file
+	// useful without writing a line for every HLE call. DEBUG for everything is far too slow on
+	// the PS3, where each line is a write to the HDD.
+	if (fullLog && PS3Frontend::GetSettings().logLevel < 2) {
+		for (int i = 0; i < (int)Log::NUMBER_OF_LOGS; i++)
+			g_logManager.SetLogLevel((Log)i, LogLevel::LWARNING);
+	}
+#endif
 
 	// Unpacking an updater is a standalone action - no emulation involved, so do it here and exit
 	// before any of the setup below.
@@ -1100,7 +1295,13 @@ int main(int argc, const char* argv[]) {
 	Core_RegisterDebugOutputListeners(&SendDebugOutput, &SendDebugScreenshot);
 
 	// Needs to be after log so we don't interfere with test output.
+#if defined(PPSSPP_PS3_FRONTEND)
+	PS3Frontend::Trace("ThreadManager initialization entered");
+#endif
 	g_threadManager.Init(cpu_info.num_cores, cpu_info.logical_cpu_count);
+#if defined(PPSSPP_PS3_FRONTEND)
+	PS3Frontend::Trace("ThreadManager initialization returned");
+#endif
 
 	std::string error_string;
 
@@ -1109,6 +1310,9 @@ int main(int argc, const char* argv[]) {
 	// every other build (bFastMemory and bFuncReplacements are both "true" defaults that came out
 	// false that way). Apply the defaults first, then force the values the tests want.
 	g_Config.RestoreDefaults(RestoreSettingsBits::SETTINGS, false);
+#if defined(PPSSPP_PS3_FRONTEND)
+	PS3Frontend::Trace("Core configuration defaults restored");
+#endif
 
 	// Force known values for deterministic test execution. This happens before
 	// ApplyToConfig() below, so a matching command line flag can still override any of it -
@@ -1177,6 +1381,11 @@ int main(int argc, const char* argv[]) {
 	// ApplyToConfig() has the final say, applied after RestoreDefaults() and the headless
 	// overrides above, so a matching command line flag always wins.
 	cmdLineOptions.ApplyToConfig();
+#if defined(PPSSPP_PS3_FRONTEND)
+	// Playing a game, not running a test: use the app's defaults where the test harness differs,
+	// plus the user's frontend settings (frameskip etc.).
+	PS3Frontend::ApplyCoreSettings();
+#endif
 
 	// pspautotests is plain homebrew PRXes so do not ship user libraries that a retail disc may carry. 
 	// So we must use HLE, unless we install firmware.
@@ -1319,7 +1528,12 @@ int main(int argc, const char* argv[]) {
 	coreParameter.renderHeight = 272 * coreParameter.renderScaleFactor;
 	coreParameter.pixelWidth = 480 * coreParameter.renderScaleFactor;
 	coreParameter.pixelHeight = 272 * coreParameter.renderScaleFactor;
+#if defined(PPSSPP_PS3_FRONTEND)
+	// Speed limit on: sceDisplay paces frames to 60 fps and frameskip can engage.
+	coreParameter.fastForward = !PS3Frontend::GetSettings().speedLimit;
+#else
 	coreParameter.fastForward = true;
+#endif
 
 #if PPSSPP_PLATFORM(IOS)
 	// GetExeDirectory() knows nothing on iOS, but argv[0] is the executable inside the .app,
@@ -1426,6 +1640,19 @@ int main(int argc, const char* argv[]) {
 			break;
 		nextPath = nextPath.NavigateUp();
 	}
+#if PPSSPP_PLATFORM(PS3)
+	// No executable directory on the PS3: the assets (fallback PSP fonts) sit next to the EBOOT.BIN
+	// the frontend passes as argv[0].
+	if (argc > 0 && argv[0]) {
+		// Registered without checking: a directory check isn't reliable on every PS3 file system.
+		const Path assets = Path(argv[0]).NavigateUp() / "assets";
+		g_VFS.Register("", new DirectoryReader(assets));
+		size_t atlasSize = 0;
+		uint8_t *atlas = g_VFS.ReadFile("ppge_atlas.zim", &atlasSize);
+		WARN_LOG(Log::System, "Assets: %s (ppge_atlas.zim %s, %u bytes)", assets.c_str(), atlas ? "found" : "NOT FOUND", (unsigned)atlasSize);
+		delete[] atlas;
+	}
+#endif
 
 	if (cmdLineOptions.screenshotFilename.has_value()) {
 		SetComparisonScreenshot(Path(std::string(cmdLineOptions.screenshotFilename.value())), testOptions.maxScreenshotError);

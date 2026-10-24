@@ -81,6 +81,9 @@ struct RasterizerState {
 	float textureLodSlope;
 	// TEXFLUSHes before this state (BinManager::SelfTextureSnapshot).
 	uint32_t texFlushGen = 0;
+	// g_geCpuEpoch when this state was last used for a draw: texture memory can only have changed
+	// (other than by drawing) when this differs.
+	uint32_t cpuEpoch = 0;
 	RasterizerStateFlags flags = RasterizerStateFlags::NONE;
 	RasterizerStateFlags lastFlags = RasterizerStateFlags::INVALID;
 	// The binner's tile generation in which threads may be drawing with it (BinManager::DistributeItems).
@@ -110,6 +113,32 @@ struct RasterizerState {
 		return GETexLevelMode(texLevelMode);
 	}
 };
+
+// For hardware backends: the state with what they don't use cleared (mipmap and LOD details, the
+// software rasterizer's function pointers, the CLUT pointer - compare the table itself - and the
+// texture blend color when the texture function doesn't use it), so equal results mean draws
+// that look the same on the backend. Gran Turismo changes the LOD bias between draws.
+inline void NormalizeForHardware(RasterizerState &s) {
+	s.samplerID.cached.clut = nullptr;
+	s.drawPixel = nullptr;
+	s.drawSpan = nullptr;
+	s.linear = nullptr;
+	s.nearest = nullptr;
+	for (int i = 1; i < 8; ++i) {
+		s.texaddr[i] = 0;
+		s.texbufw[i] = 0;
+		s.texptr[i] = nullptr;
+	}
+	s.textureLodSlope = 0.0f;
+	s.flags = RasterizerStateFlags::NONE;
+	s.lastFlags = RasterizerStateFlags::NONE;
+	s.maxTexLevel = 0;
+	s.texLevelMode = 0;
+	s.texLevelOffset = 0;
+	s.mipFilt = false;
+	if (s.samplerID.TexFunc() != GE_TEXFUNC_BLEND)
+		s.samplerID.cached.texBlendColor = 0;
+}
 
 void ComputeRasterizerState(RasterizerState *state);
 void CalculateRasterStateFlags(RasterizerState *state, const VertexData &v0);

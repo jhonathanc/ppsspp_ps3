@@ -770,6 +770,8 @@ u32 Atrac::DecodeData(u8 *outbuf, u32 outbufPtr, int *SamplesNum, int *finish, i
 			return SCE_ERROR_ATRAC_ALL_DATA_DECODED;
 		}
 
+		ConvertAudioSamplesToGuest(outbuf, outSamples * outputChannels_);
+
 		if (packetAddr != 0 && MemBlockInfoDetailed()) {
 			char tagData[128];
 			size_t tagSize = FormatMemWriteTagAt(tagData, sizeof(tagData), "AtracDecode/", packetAddr, track_.bytesPerFrame);
@@ -1017,9 +1019,9 @@ void Atrac::NotifyGetContextAddress() {
 		context_ = kernelMemory.Alloc(contextSize, false, StringFromFormat("AtracCtx/%d", atracID_).c_str());
 		if (context_.IsValid())
 			Memory::Memset(context_.ptr, 0, contextSize, "AtracContextClear");
-		WARN_LOG(Log::Atrac, "%08x=_sceAtracGetContextAddress(%i): allocated new context", context_.ptr, atracID_);
+		WARN_LOG(Log::Atrac, "%08x=_sceAtracGetContextAddress(%i): allocated new context", (unsigned int)context_.ptr, atracID_);
 	} else {
-		WARN_LOG(Log::Atrac, "%08x=_sceAtracGetContextAddress(%i)", context_.ptr, atracID_);
+		WARN_LOG(Log::Atrac, "%08x=_sceAtracGetContextAddress(%i)", (unsigned int)context_.ptr, atracID_);
 	}
 	WriteContextToPSPMem();
 }

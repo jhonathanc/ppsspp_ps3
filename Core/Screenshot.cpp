@@ -396,8 +396,7 @@ bool ScreenshotNotifyPostGameRender(Draw::DrawContext *draw) {
 }
 
 static void SaveScreenshotAsync(GPUDebugBuffer &&buf, int w, int h, int maxRes) {
-	g_threadManager.EnqueueTask(new IndependentTask(TaskType::IO_BLOCKING, TaskPriority::LOW,
-		[filename = std::move(g_pendingScreenshot.path), buf = std::move(buf), callback = std::move(g_pendingScreenshot.callback), fmt = g_pendingScreenshot.format, w, h, maxRes]() {
+	auto saveTask = [filename = std::move(g_pendingScreenshot.path), buf = std::move(buf), callback = std::move(g_pendingScreenshot.callback), fmt = g_pendingScreenshot.format, w, h, maxRes]() {
 		u8 *flipbuffer = nullptr;
 		u32 width = w, height = h;
 		const u8 *buffer = ConvertBufferToScreenshot(buf, false, flipbuffer, width, height);
@@ -436,7 +435,8 @@ static void SaveScreenshotAsync(GPUDebugBuffer &&buf, int w, int h, int maxRes) 
 		System_RunOnMainThread([result, callback = std::move(callback)]() {
 			callback(result);
 		});
-	}));
+	};
+	g_threadManager.EnqueueTask(new IndependentTask<decltype(saveTask)>(TaskType::IO_BLOCKING, TaskPriority::LOW, std::move(saveTask)));
 }
 
 bool Save888RGBScreenshot(const Path &filename, ScreenshotFormat fmt, const u8 *bufferRGB888, int w, int h) {

@@ -140,7 +140,7 @@ bool ParamSFOData::ReadSFO(const u8 *paramsfo, size_t size) {
 	if (header->magic != 0x46535000)
 		return false;
 	if (header->version != 0x00000101)
-		WARN_LOG(Log::Loader, "Unexpected SFO header version: %08x", header->version);
+		WARN_LOG(Log::Loader, "Unexpected SFO header version: %08x", (unsigned int)header->version);
 
 	const IndexTable *indexTables = (const IndexTable *)(paramsfo + sizeof(Header));
 
@@ -194,7 +194,7 @@ bool ParamSFOData::ReadSFO(const u8 *paramsfo, size_t size) {
 				// Unsigned int
 				const u32_le *data = (const u32_le *)(paramsfo + data_offset);
 				SetValue(key, *data, indexTables[i].param_max_len);
-				VERBOSE_LOG(Log::Loader, "%s %08x", key.c_str(), *data);
+				VERBOSE_LOG(Log::Loader, "%s %08x", key.c_str(), (unsigned int)*data);
 			}
 			break;
 		case 0x0004:
@@ -239,7 +239,7 @@ int ParamSFOData::GetDataOffset(const u8 *paramsfo, size_t size, const char *dat
 	if (header->magic != 0x46535000)
 		return -1;
 	if (header->version != 0x00000101)
-		WARN_LOG(Log::Loader, "Unexpected SFO header version: %08x", header->version);
+		WARN_LOG(Log::Loader, "Unexpected SFO header version: %08x", (unsigned int)header->version);
 
 	// Both the index table and the key/data tables must fit in the buffer.
 	if (sizeof(Header) + (size_t)header->index_table_entries * sizeof(IndexTable) > size)

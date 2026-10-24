@@ -130,28 +130,28 @@ inline static Nearest4 SOFTRAST_CALL SampleNearest(const int u[N], const int v[N
 	case GE_TFMT_4444:
 		for (int i = 0; i < N; ++i) {
 			const u8 *src = srcptr + GetPixelDataOffset<16>(texbufw, u[i], v[i], samplerID.swizzle);
-			res.v[i] = RGBA4444ToRGBA8888(*(const u16 *)src);
+			res.v[i] = RGBA4444ToRGBA8888(*(const u16_le *)src);
 		}
 		return res;
 	
 	case GE_TFMT_5551:
 		for (int i = 0; i < N; ++i) {
 			const u8 *src = srcptr + GetPixelDataOffset<16>(texbufw, u[i], v[i], samplerID.swizzle);
-			res.v[i] = RGBA5551ToRGBA8888(*(const u16 *)src);
+			res.v[i] = RGBA5551ToRGBA8888(*(const u16_le *)src);
 		}
 		return res;
 
 	case GE_TFMT_5650:
 		for (int i = 0; i < N; ++i) {
 			const u8 *src = srcptr + GetPixelDataOffset<16>(texbufw, u[i], v[i], samplerID.swizzle);
-			res.v[i] = RGB565ToRGBA8888(*(const u16 *)src);
+			res.v[i] = RGB565ToRGBA8888(*(const u16_le *)src);
 		}
 		return res;
 
 	case GE_TFMT_8888:
 		for (int i = 0; i < N; ++i) {
 			const u8 *src = srcptr + GetPixelDataOffset<32>(texbufw, u[i], v[i], samplerID.swizzle);
-			res.v[i] = *(const u32 *)src;
+			res.v[i] = *(const u32_le *)src;
 		}
 		return res;
 

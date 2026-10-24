@@ -491,6 +491,8 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 			IR_NEXT;
 		IR_CASE(Store16)
 			space.WriteUnchecked_U16(mips->r[inst->src3], mips->r[inst->src1] + inst->constant);
+			if (MIPSComp::g_irStoreWatch)
+				MIPSComp::IRStoreWatchNote(mips->r[inst->src1] + inst->constant, mips->r[inst->src3] & 0xFFFF, 2);
 			IR_NEXT;
 		IR_CASE(Store32)
 			space.WriteUnchecked_U32(mips->r[inst->src3], mips->r[inst->src1] + inst->constant);
@@ -498,6 +500,8 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 		IR_CASE(Store32Left)
 		{
 			u32 addr = mips->r[inst->src1] + inst->constant;
+			if (MIPSComp::g_irStoreWatch)
+				MIPSComp::IRStoreWatchNote(addr, mips->r[inst->src3], 'L');
 			u32 shift = (addr & 3) * 8;
 			u32 mem = space.ReadUnchecked_U32(addr & 0xfffffffc);
 			u32 memMask = 0xffffff00 << shift;
@@ -508,6 +512,8 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 		IR_CASE(Store32Right)
 		{
 			u32 addr = mips->r[inst->src1] + inst->constant;
+			if (MIPSComp::g_irStoreWatch)
+				MIPSComp::IRStoreWatchNote(addr, mips->r[inst->src3], 'R');
 			u32 shift = (addr & 3) * 8;
 			u32 mem = space.ReadUnchecked_U32(addr & 0xfffffffc);
 			u32 memMask = 0x00ffffff >> (24 - shift);
@@ -532,14 +538,25 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 		IR_CASE(LoadVec4)
 		{
 			u32 base = mips->r[inst->src1] + inst->constant;
-			// This compiles to a nice SSE load/store on x86, and hopefully similar on ARM.
+			#if COMMON_BIG_ENDIAN
+			// PSP memory is little-endian; each host register needs its own conversion.
+			for (int i = 0; i < 4; ++i)
+				mips->fi[inst->dest + i] = space.ReadUnchecked_U32(base + i * 4);
+#else
+			// Keep the bulk copy on little-endian hosts.
 			memcpy(&mips->f[inst->dest], space.GetPointerUnchecked(base), 4 * 4);
+#endif
 			IR_NEXT;
 		}
 		IR_CASE(StoreVec4)
 		{
 			u32 base = mips->r[inst->src1] + inst->constant;
-			memcpy((float *)space.GetPointerUnchecked(base), &mips->f[inst->dest], 4 * 4);
+			#if COMMON_BIG_ENDIAN
+			for (int i = 0; i < 4; ++i)
+				space.WriteUnchecked_U32(mips->fi[inst->src3 + i], base + i * 4);
+#else
+			memcpy((float *)space.GetPointerUnchecked(base), &mips->f[inst->src3], 4 * 4);
+#endif
 			IR_NEXT;
 		}
 
@@ -624,8 +641,10 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 #elif PPSSPP_ARCH(ARM_NEON) && PPSSPP_ARCH(ARM64)
 			vst1q_f32(&mips->f[inst->dest], vaddq_f32(vld1q_f32(&mips->f[inst->src1]), vld1q_f32(&mips->f[inst->src2])));
 #else
-			for (int i = 0; i < 4; i++)
+			for (int i = 0; i < 4; i++) {
 				mips->f[inst->dest + i] = mips->f[inst->src1 + i] + mips->f[inst->src2 + i];
+				FlushGuestFPUResult(mips, inst->dest + i);
+			}
 #endif
 			IR_NEXT;
 		}
@@ -637,8 +656,10 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 #elif PPSSPP_ARCH(ARM_NEON) && PPSSPP_ARCH(ARM64)
 			vst1q_f32(&mips->f[inst->dest], vsubq_f32(vld1q_f32(&mips->f[inst->src1]), vld1q_f32(&mips->f[inst->src2])));
 #else
-			for (int i = 0; i < 4; i++)
+			for (int i = 0; i < 4; i++) {
 				mips->f[inst->dest + i] = mips->f[inst->src1 + i] - mips->f[inst->src2 + i];
+				FlushGuestFPUResult(mips, inst->dest + i);
+			}
 #endif
 			IR_NEXT;
 		}
@@ -650,8 +671,10 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 #elif PPSSPP_ARCH(ARM_NEON) && PPSSPP_ARCH(ARM64)
 			vst1q_f32(&mips->f[inst->dest], vmulq_f32(vld1q_f32(&mips->f[inst->src1]), vld1q_f32(&mips->f[inst->src2])));
 #else
-			for (int i = 0; i < 4; i++)
+			for (int i = 0; i < 4; i++) {
 				mips->f[inst->dest + i] = mips->f[inst->src1 + i] * mips->f[inst->src2 + i];
+				FlushGuestFPUResult(mips, inst->dest + i);
+			}
 #endif
 			IR_NEXT;
 		}
@@ -663,8 +686,10 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 #elif PPSSPP_ARCH(ARM64_NEON)
 			vst1q_f32(&mips->f[inst->dest], vdivq_f32(vld1q_f32(&mips->f[inst->src1]), vld1q_f32(&mips->f[inst->src2])));
 #else
-			for (int i = 0; i < 4; i++)
+			for (int i = 0; i < 4; i++) {
 				mips->f[inst->dest + i] = mips->f[inst->src1 + i] / mips->f[inst->src2 + i];
+				FlushGuestFPUResult(mips, inst->dest + i);
+			}
 #endif
 			IR_NEXT;
 		}
@@ -677,8 +702,10 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 			vst1q_f32(&mips->f[inst->dest], vmulq_lane_f32(vld1q_f32(&mips->f[inst->src1]), vdup_n_f32(mips->f[inst->src2]), 0));
 #else
 			const float factor = mips->f[inst->src2];
-			for (int i = 0; i < 4; i++)
+			for (int i = 0; i < 4; i++) {
 				mips->f[inst->dest + i] = mips->f[inst->src1 + i] * factor;
+				FlushGuestFPUResult(mips, inst->dest + i);
+			}
 #endif
 			IR_NEXT;
 		}
@@ -1084,45 +1111,47 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 		IR_CASE(Mult)
 		{
 			s64 result = (s64)(s32)mips->r[inst->src1] * (s64)(s32)mips->r[inst->src2];
-			memcpy(&mips->lo, &result, 8);  // note: lo is followed by hi, so this is ok (little-endian).
+			mips->lo = (u32)result;
+			mips->hi = (u32)((u64)result >> 32);
 			IR_NEXT;
 		}
 		IR_CASE(MultU)
 		{
 			u64 result = (u64)mips->r[inst->src1] * (u64)mips->r[inst->src2];
-			memcpy(&mips->lo, &result, 8);
+			mips->lo = (u32)result;
+			mips->hi = (u32)((u64)result >> 32);
 			IR_NEXT;
 		}
 		IR_CASE(Madd)
 		{
-			s64 result;
-			memcpy(&result, &mips->lo, 8);
+			u64 result = ((u64)mips->hi << 32) | mips->lo;
 			result += (s64)(s32)mips->r[inst->src1] * (s64)(s32)mips->r[inst->src2];
-			memcpy(&mips->lo, &result, 8);
+			mips->lo = (u32)result;
+			mips->hi = (u32)((u64)result >> 32);
 			IR_NEXT;
 		}
 		IR_CASE(MaddU)
 		{
-			s64 result;
-			memcpy(&result, &mips->lo, 8);
+			u64 result = ((u64)mips->hi << 32) | mips->lo;
 			result += (u64)mips->r[inst->src1] * (u64)mips->r[inst->src2];
-			memcpy(&mips->lo, &result, 8);
+			mips->lo = (u32)result;
+			mips->hi = (u32)((u64)result >> 32);
 			IR_NEXT;
 		}
 		IR_CASE(Msub)
 		{
-			s64 result;
-			memcpy(&result, &mips->lo, 8);
+			u64 result = ((u64)mips->hi << 32) | mips->lo;
 			result -= (s64)(s32)mips->r[inst->src1] * (s64)(s32)mips->r[inst->src2];
-			memcpy(&mips->lo, &result, 8);
+			mips->lo = (u32)result;
+			mips->hi = (u32)((u64)result >> 32);
 			IR_NEXT;
 		}
 		IR_CASE(MsubU)
 		{
-			s64 result;
-			memcpy(&result, &mips->lo, 8);
+			u64 result = ((u64)mips->hi << 32) | mips->lo;
 			result -= (u64)mips->r[inst->src1] * (u64)mips->r[inst->src2];
-			memcpy(&mips->lo, &result, 8);
+			mips->lo = (u32)result;
+			mips->hi = (u32)((u64)result >> 32);
 			IR_NEXT;
 		}
 
@@ -1172,9 +1201,11 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 
 		IR_CASE(FAdd)
 			mips->f[inst->dest] = mips->f[inst->src1] + mips->f[inst->src2];
+			FlushGuestFPUResult(mips, inst->dest);
 			IR_NEXT;
 		IR_CASE(FSub)
 			mips->f[inst->dest] = mips->f[inst->src1] - mips->f[inst->src2];
+			FlushGuestFPUResult(mips, inst->dest);
 			IR_NEXT;
 		IR_CASE(FMul)
 #if 1
@@ -1186,6 +1217,7 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 			} else {
 				mips->f[inst->dest] = a * b;
 			}
+			FlushGuestFPUResult(mips, inst->dest);
 		}
 			IR_NEXT;
 #else
@@ -1204,6 +1236,7 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 #endif
 		IR_CASE(FDiv)
 			mips->f[inst->dest] = mips->f[inst->src1] / mips->f[inst->src2];
+			FlushGuestFPUResult(mips, inst->dest);
 			IR_NEXT;
 		// These are vmin and vmax, see vfpu_minmax_key.
 		IR_CASE(FMin)
@@ -1229,6 +1262,7 @@ u32 IRInterpret(MIPSState *mips, const IRInst *inst, const IRInst *chainArena) {
 		{
 			float src = mips->f[inst->src1];
 			mips->f[inst->dest] = sqrtf(src);
+			FlushGuestFPUResult(mips, inst->dest);
 			// A negative input gives a positive NaN, not the host's (cpu/fpu/roundmode).
 			if (src < 0.0f) {
 				mips->fi[inst->dest] = 0x7FC00000;

@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <condition_variable>
@@ -30,6 +31,7 @@
 #include "Core/System.h"
 #include "GPU/Common/TextureDecoder.h"
 #include "GPU/Software/BinManager.h"
+#include "GPU/Software/HardwareBackend.h"
 #include "GPU/Software/Rasterizer.h"
 #include "GPU/Software/RasterizerRectangle.h"
 #include "GPU/Software/SoftGpu.h"
@@ -151,6 +153,62 @@ private:
 
 constexpr int BinManager::MAX_POSSIBLE_TASKS;
 
+namespace Rasterizer {
+HardwareBackend *g_hardwareBackend = nullptr;
+FlushRange g_flushRange;
+
+static struct {
+	uint32_t start[16], end[16];
+	int count = 0;
+	bool all = false;  // More than fit: everything counts as pending.
+} g_asyncRam;
+
+void NoteAsyncRamWrite(uint32_t start, uint32_t size) {
+	start &= 0x3FFFFFFF;
+	for (int i = 0; i < g_asyncRam.count; ++i) {
+		if (g_asyncRam.start[i] == start) {
+			g_asyncRam.end[i] = std::max(g_asyncRam.end[i], start + size);
+			return;
+		}
+	}
+	if (g_asyncRam.count == 16) {
+		g_asyncRam.all = true;
+		return;
+	}
+	g_asyncRam.start[g_asyncRam.count] = start;
+	g_asyncRam.end[g_asyncRam.count] = start + size;
+	g_asyncRam.count++;
+}
+
+bool AsyncRamWritePending(uint32_t start, uint32_t size) {
+	if (g_asyncRam.all)
+		return true;
+	start &= 0x3FFFFFFF;
+	for (int i = 0; i < g_asyncRam.count; ++i) {
+		if (start < g_asyncRam.end[i] && start + size > g_asyncRam.start[i])
+			return true;
+	}
+	return false;
+}
+
+bool AsyncRamWritesQueued() {
+	return g_asyncRam.all || g_asyncRam.count != 0;
+}
+
+void ClearAsyncRamWrites() {
+	g_asyncRam.count = 0;
+	g_asyncRam.all = false;
+}
+uint32_t g_geCpuEpoch = 1;
+bool g_geEpochSeen = true;
+bool g_tlMergeEnabled = true;
+uint32_t g_geStateSerial = 1;
+int g_lastSerialCmd = -1;
+GeDirtyRange g_geDirty[256];
+uint32_t g_drawSerial = 0;
+const GEState *g_drawStateOverride = nullptr;
+}
+
 BinManager::BinManager() {
 	waitable_ = new BinWaitable();
 	for (auto &s : taskStatus_)
@@ -245,9 +303,58 @@ void BinManager::DeswizzleMirrorTextures(RasterizerState &state) {
 
 void BinManager::UpdateState() {
 	PROFILE_THIS_SCOPE("bin_state");
+	Rasterizer::g_drawSerial++;
+	// Only the LOD mode/bias changed: patched below, unless the state was already optimized for
+	// its draws (then its sampler and functions aren't the plain ones any more).
+	if (HasDirty(SoftDirty::RAST_TEXLEVEL) && !HasDirty(SoftDirty::PIXEL_ALL | SoftDirty::SAMPLER_ALL | SoftDirty::RAST_ALL) &&
+		(states_[stateIndex_].flags & RasterizerStateFlags::OPTIMIZED))
+		dirty_ |= SoftDirty::RAST_TEX;
 	if (HasDirty(SoftDirty::PIXEL_ALL | SoftDirty::SAMPLER_ALL | SoftDirty::RAST_ALL)) {
 		PushState();
-		ClearDirty(SoftDirty::PIXEL_ALL | SoftDirty::SAMPLER_ALL | SoftDirty::RAST_ALL);
+		ClearDirty(SoftDirty::PIXEL_ALL | SoftDirty::SAMPLER_ALL | SoftDirty::RAST_ALL | SoftDirty::RAST_TEXLEVEL);
+	} else if (HasDirty(SoftDirty::RAST_TEXLEVEL)) {
+		const RasterizerState &cur = states_[stateIndex_];
+		const uint8_t mode = (uint8_t)gstate.getTexLevelMode();
+		const int8_t offset = (int8_t)gstate.getTexLevelOffset16();
+		if (cur.enableTextures && (cur.texLevelMode != mode || cur.texLevelOffset != offset)) {
+			// A new one: queued draws may still use the current one.
+			alignas(16) RasterizerState next;
+			memcpy((void *)&next, (const void *)&cur, sizeof(next));
+			next.texLevelMode = mode;
+			next.texLevelOffset = offset;
+			// What the draws so far found (CalculateRasterStateFlags) is for them only.
+			next.flags = RasterizerStateFlags::NONE;
+			next.lastFlags = RasterizerStateFlags::INVALID;
+			if (states_.Full())
+				Flush("states");
+			stateIndex_ = (uint16_t)states_.Push(next);
+#if !PPSSPP_PLATFORM(PS3)
+			// PPSSPP_PATCHCHECK: compare with the state computed again.
+			static const bool check = getenv("PPSSPP_PATCHCHECK") != nullptr;
+			if (check) {
+				alignas(16) RasterizerState fresh{};
+				fresh.texFlushGen = next.texFlushGen;
+				fresh.cpuEpoch = next.cpuEpoch;
+				fresh.selfTexture = next.selfTexture;
+				ComputeRasterizerState(&fresh);
+				fresh.samplerID.cached.clut = cluts_[clutIndex_].readable;
+				const uint8_t *a = (const uint8_t *)&fresh, *b = (const uint8_t *)&next;
+				static int bad, total;
+				total++;
+				for (size_t i = 0; i < sizeof(fresh); ++i) {
+					if (a[i] != b[i]) {
+						if (bad++ < 20)
+							fprintf(stderr, "PATCHCHECK: byte %d differs (%02x vs patched %02x); sampler at %d, funcs at %d; texmode %08x texfilter %08x tex %08x; levels %d/%d mips %d/%d\n", (int)i, a[i], b[i], (int)offsetof(RasterizerState, samplerID), (int)offsetof(RasterizerState, drawPixel),
+								gstate.texmode, gstate.texfilter, gstate.texaddr[0], fresh.maxTexLevel, next.maxTexLevel, fresh.samplerID.hasAnyMips, next.samplerID.hasAnyMips);
+						break;
+					}
+				}
+				if ((total & 1023) == 0)
+					fprintf(stderr, "PATCHCHECK: %d of %d differ\n", bad, total);
+			}
+#endif
+		}
+		ClearDirty(SoftDirty::RAST_TEXLEVEL);
 	}
 
 	if (lastFlipstats_ != gpuStats.totals.numFlips) {
@@ -278,15 +385,19 @@ void BinManager::UpdateState() {
 			dirty_ |= SoftDirty::BINNER_OVERLAP;
 		}
 
-		// Okay, now update what's pending. Texturing from it is ordered per primitive (NeedsOrder), so
-		// whether the texture overlaps has to be decided again.
-		MarkPendingWrites(state);
-		dirty_ |= SoftDirty::BINNER_OVERLAP;
+		if (!Rasterizer::g_hardwareBackend) {
+			// Okay, now update what's pending. Texturing from it is ordered per primitive (NeedsOrder), so
+			// whether the texture overlaps has to be decided again.
+			MarkPendingWrites(state);
+			dirty_ |= SoftDirty::BINNER_OVERLAP;
+		}
 
 		ClearDirty(SoftDirty::BINNER_RANGE);
 	}
 
-	if (HasDirty(SoftDirty::BINNER_OVERLAP)) {
+	if (HasDirty(SoftDirty::BINNER_OVERLAP) && Rasterizer::g_hardwareBackend) {
+		ClearDirty(SoftDirty::BINNER_OVERLAP);
+	} else if (HasDirty(SoftDirty::BINNER_OVERLAP)) {
 		// This is a good place to record any dependencies for block transfer overlap.
 		MarkPendingReads(state);
 
@@ -318,6 +429,8 @@ void BinManager::UpdateState() {
 	}
 	states_[stateIndex_].selfTexture = selfRender_;
 	states_[stateIndex_].texFlushGen = texFlushGen_;
+	states_[stateIndex_].cpuEpoch = Rasterizer::g_geCpuEpoch;
+	Rasterizer::g_geEpochSeen = true;
 }
 
 // The GE samples through its texture cache, so a primitive that textures from the buffer it draws to
@@ -523,6 +636,10 @@ void BinManager::AddTriangle(const VertexData &v0, const VertexData &v1, const V
 	const BinCoords range = Range(v0, v1, v2);
 	if (range.Invalid())
 		return;
+	if (Rasterizer::g_hardwareBackend) {
+		Rasterizer::g_hardwareBackend->Triangle(State(), v0, v1, v2);
+		return;
+	}
 
 	if (queue_.Full())
 		MakeRoom();
@@ -549,6 +666,10 @@ void BinManager::AddClearRect(const VertexData &v0, const VertexData &v1) {
 	const BinCoords range = Range(v0, v1);
 	if (range.Invalid())
 		return;
+	if (Rasterizer::g_hardwareBackend) {
+		Rasterizer::g_hardwareBackend->Rect(State(), v0, v1, true);
+		return;
+	}
 
 	if (queue_.Full())
 		MakeRoom();
@@ -561,6 +682,10 @@ void BinManager::AddRect(const VertexData &v0, const VertexData &v1) {
 	const BinCoords range = Range(v0, v1);
 	if (range.Invalid())
 		return;
+	if (Rasterizer::g_hardwareBackend) {
+		Rasterizer::g_hardwareBackend->Rect(State(), v0, v1, false);
+		return;
+	}
 
 	if (queue_.Full())
 		MakeRoom();
@@ -573,6 +698,10 @@ void BinManager::AddSprite(const VertexData &v0, const VertexData &v1) {
 	const BinCoords range = Range(v0, v1);
 	if (range.Invalid())
 		return;
+	if (Rasterizer::g_hardwareBackend) {
+		Rasterizer::g_hardwareBackend->Rect(State(), v0, v1, false);
+		return;
+	}
 
 	if (queue_.Full())
 		MakeRoom();
@@ -585,6 +714,10 @@ void BinManager::AddLine(const VertexData &v0, const VertexData &v1) {
 	const BinCoords range = Range(v0, v1);
 	if (range.Invalid())
 		return;
+	if (Rasterizer::g_hardwareBackend) {
+		Rasterizer::g_hardwareBackend->Line(State(), v0, v1);
+		return;
+	}
 
 	if (queue_.Full())
 		MakeRoom();
@@ -597,6 +730,10 @@ void BinManager::AddPoint(const VertexData &v0) {
 	const BinCoords range = Range(v0);
 	if (range.Invalid())
 		return;
+	if (Rasterizer::g_hardwareBackend) {
+		Rasterizer::g_hardwareBackend->Point(State(), v0);
+		return;
+	}
 
 	if (queue_.Full())
 		MakeRoom();
@@ -850,6 +987,21 @@ bool BinManager::ProcessTiles(int start) {
 }
 
 void BinManager::Flush(const char *reason) {
+	if (Rasterizer::g_hardwareBackend) {
+		// Nothing is ever queued here; let the backend write back what the reason needs, then forget
+		// pending ranges exactly as a real flush does.
+		Rasterizer::g_hardwareBackend->Flush(reason);
+		while (states_.Size() > 1)
+			states_.SkipNext();
+		while (cluts_.Size() > 1)
+			cluts_.SkipNext();
+		for (BinDirtyRange &pending : pendingWrites_)
+			pending.base = 0;
+		queuedSinceFlush_ = false;
+		pendingReads_.clear();
+		dirty_ |= SoftDirty::BINNER_RANGE | SoftDirty::BINNER_OVERLAP;
+		return;
+	}
 	if (!queuedSinceFlush_) {
 		// Nothing queued, so nothing refers to the older states and CLUTs. Trim them anyway: callers
 		// flush because one of these rings is full, and push into it right after.
@@ -930,6 +1082,8 @@ void BinManager::OptimizePendingStates(uint16_t first, uint16_t last) {
 }
 
 bool BinManager::HasPendingWrite(uint32_t start, uint32_t stride, uint32_t w, uint32_t h) {
+	if (Rasterizer::g_hardwareBackend)
+		return Rasterizer::g_hardwareBackend->HasPendingWrite(start, stride, w, h);
 	// We can only write to VRAM.
 	if (!Memory::IsVRAMAddress(start))
 		return false;
@@ -969,6 +1123,13 @@ bool BinManager::PendingWriteIn(const BinDirtyRange &range, uint32_t start, uint
 }
 
 bool BinManager::HasPendingRead(uint32_t start, uint32_t stride, uint32_t w, uint32_t h) {
+	// The hardware backend copies textures when drawing (on the GE worker, if there is one, so
+	// finish that first).
+	if (Rasterizer::g_hardwareBackend) {
+		if (Rasterizer::g_hardwareBackend->MayRead(start, stride, w, h))
+			Rasterizer::g_hardwareBackend->Sync();
+		return false;
+	}
 	if (Memory::IsVRAMAddress(start)) {
 		// Ignore VRAM mirrors.
 		start &= 0x041FFFFF;

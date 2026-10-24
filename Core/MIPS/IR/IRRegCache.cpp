@@ -951,7 +951,7 @@ void IRNativeRegCacheBase::MappingFromInst(const IRInst &inst, Mapping mapping[3
 
 		case 'F':
 			mapping[i].reg += 32;
-			mapping[i].type = 'F';
+			mapping[i].type = config_.mapFloatsAsVRegs ? 'V' : 'F';
 			_assert_msg_(IsValidFPR(mapping[i].reg - 32), "F was not valid FPR?");
 			break;
 
@@ -1070,7 +1070,10 @@ void IRNativeRegCacheBase::MapNativeReg(MIPSLoc type, IRNativeReg nreg, IRReg fi
 			int oldlane = mreg.lane == -1 ? 0 : mreg.lane;
 			bool mismatch = oldlanes != lanes || oldlane != i;
 			if (mismatch) {
-				_assert_msg_(!mreg.isStatic, "Cannot MapNativeReg a static reg mismatch");
+				if (mreg.isStatic) {
+					staticMismatch = true;
+					return;
+				}
 				if ((flags & MIPSMap::NOINIT) != MIPSMap::NOINIT) {
 					// If we need init, we have to flush mismatches.
 					if (!TransferNativeReg(mreg.nReg, nreg, type, first, lanes, flags)) {

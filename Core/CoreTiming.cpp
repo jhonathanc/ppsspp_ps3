@@ -34,6 +34,9 @@
 #include "Core/HLE/__sceAudio.h"
 #include "Core/MIPS/MIPS.h"
 #include "Core/MIPS/MeCore.h"
+#if PPSSPP_ARCH(POWERPC)
+#include "GPU/PS3Profile.h"
+#endif
 
 static const int initialHz = 222000000;
 int CPU_HZ = 222000000;
@@ -304,6 +307,14 @@ void ScheduleEvent(s64 cyclesIntoFuture, int event_type, u64 userdata)
 	}
 }
 
+void LimitSlice(s64 cyclesIntoFuture) {
+	if (cyclesIntoFuture < currentMIPS->downcount) {
+		const int diff = (int)std::max<s64>(cyclesIntoFuture, 0) - currentMIPS->downcount;
+		slicelength += diff;
+		currentMIPS->downcount += diff;
+	}
+}
+
 // Returns cycles left in timer.
 s64 UnscheduleEvent(int event_type, u64 userdata)
 {
@@ -398,6 +409,34 @@ void RemoveEvent(int event_type)
 	}
 }
 
+#if PPSSPP_ARCH(POWERPC)
+// Time base ticks spent in each event type's callback, and calls (the PS3 frontend's perf line).
+static uint64_t s_evtTicks[128], s_evtCalls[128];
+
+std::string PerfEventSummary(double tbPerMs, double frames) {
+	std::string out;
+	uint64_t total = 0;
+	for (int i = 0; i < 128; ++i) total += s_evtTicks[i];
+	char buf[96];
+	snprintf(buf, sizeof(buf), "%.1fms", total / tbPerMs / frames);
+	out = buf;
+	for (int n = 0; n < 6; ++n) {
+		int best = -1;
+		for (int i = 0; i < 128 && i < (int)event_types.size(); ++i)
+			if (s_evtTicks[i] && (best < 0 || s_evtTicks[i] > s_evtTicks[best])) best = i;
+		if (best < 0) break;
+		snprintf(buf, sizeof(buf), "%s %s %.2fms/%.0f", n == 0 ? ":" : ",", event_types[best].name ? event_types[best].name : "?",
+			s_evtTicks[best] / tbPerMs / frames, s_evtCalls[best] / frames);
+		out += buf;
+		s_evtTicks[best] = 0;
+		s_evtCalls[best] = 0;
+	}
+	memset(s_evtTicks, 0, sizeof(s_evtTicks));
+	memset(s_evtCalls, 0, sizeof(s_evtCalls));
+	return out;
+}
+#endif
+
 void ProcessEvents() {
 	while (first) {
 		if (first->time <= (s64)GetTicks(currentMIPS)) {
@@ -405,7 +444,17 @@ void ProcessEvents() {
 			Event *evt = first;
 			first = first->next;
 			if (evt->type >= 0 && evt->type < (int)event_types.size()) {
+#if PPSSPP_ARCH(POWERPC)
+				const uint64_t t0 = PS3Profile::Now();
+				const int type = evt->type;
+#endif
 				event_types[evt->type].callback(evt->userdata, (int)(GetTicks(currentMIPS) - evt->time));
+#if PPSSPP_ARCH(POWERPC)
+				if (type < 128) {
+					s_evtTicks[type] += PS3Profile::Now() - t0;
+					s_evtCalls[type]++;
+				}
+#endif
 			} else {
 				_dbg_assert_msg_(false, "Bad event type %d", evt->type);
 			}
@@ -447,12 +496,19 @@ void ForceCheck(MIPSState *mips) {
 #endif
 }
 
+void (*g_asyncWorkHook)(bool mustFinish) = nullptr;
+
 void Advance(MIPSState *mips) {
 	PROFILE_THIS_SCOPE("advance");
 	int cyclesExecuted = slicelength - mips->downcount;
 	RunOtherCPUs(cyclesExecuted);
 	globalTimer += cyclesExecuted;
 	mips->downcount = slicelength;
+
+	// Before the events: what the GE list thread scheduled for now runs in this Advance, as it
+	// would have if the lists had run on this thread.
+	if (g_asyncWorkHook)
+		g_asyncWorkHook(false);
 
 	// Debugger deadline - see SetBreakDeadlineTicks. Checked before the events so the break lands
 	// on the requested tick rather than after whatever the events do.
@@ -481,6 +537,10 @@ void Advance(MIPSState *mips) {
 		mips->downcount += diff;
 	}
 
+	// And again, so the slice just set up ends where the list thread has got to.
+	if (g_asyncWorkHook)
+		g_asyncWorkHook(false);
+
 	// Shorten the slice so we come back exactly on the deadline instead of up to a whole slice
 	// past it - the point of cpu.runUntilTime is that it stops at a reproducible place.
 	if (breakDeadlineTicks) {
@@ -502,6 +562,9 @@ void LogPendingEvents() {
 }
 
 void Idle(MIPSState *mips, int maxIdle) {
+	// (What it schedules shortens the slice, so the idle below stops there.)
+	if (g_asyncWorkHook)
+		g_asyncWorkHook(true);
 	int cyclesDown = mips->downcount;
 	if (maxIdle != 0 && cyclesDown > maxIdle)
 		cyclesDown = maxIdle;

@@ -390,6 +390,31 @@ add_library(Common STATIC
 	${CMAKE_SOURCE_DIR}/ext/jpge/jpge.h
 )
 
+if(PS3_PSL1GHT OR PPC_JIT_LINUX_TEST OR RSX_HOSTSIM_INCLUDE)
+	target_sources(Common PRIVATE PPCEmitter.cpp PPCEmitter.h)
+endif()
+
+if(NO_GL_BUILD)
+	if(PS3)
+		target_sources(Common PRIVATE MemArenaPS3.cpp MemoryUtilPS3.cpp)
+		if(PS3_PSL1GHT)
+			target_sources(Common PRIVATE Net/ResolvePS3.cpp ../PS3/SDK/PSL1GHT.c)
+		else()
+			target_sources(Common PRIVATE ../PS3/SDK/Sony.c)
+		endif()
+	endif()
+	get_target_property(PS3_COMMON_SOURCES Common SOURCES)
+	list(FILTER PS3_COMMON_SOURCES EXCLUDE REGEX "^GPU/(OpenGL|Vulkan)/")
+	list(APPEND PS3_COMMON_SOURCES GPU/OpenGL/GLFeatures.cpp)
+	if(UNITTEST)
+		list(APPEND PS3_COMMON_SOURCES GPU/Vulkan/VulkanContext.cpp)
+		if(NOT MSVC)
+			set_property(SOURCE GPU/Vulkan/VulkanContext.cpp APPEND PROPERTY COMPILE_OPTIONS -ffunction-sections -fdata-sections)
+		endif()
+	endif()
+	set_property(TARGET Common PROPERTY SOURCES ${PS3_COMMON_SOURCES})
+endif()
+
 if(LIBRETRO)
 	target_include_directories(Common PRIVATE ${CMAKE_SOURCE_DIR}/libretro/libretro-common/include)
 endif()
@@ -401,6 +426,13 @@ if(IOS AND NOT NO_OPENGL)
 endif()
 
 target_link_libraries(Common Ext::Snappy cpu_features)
+if(PS3_PSL1GHT)
+	# Use the real socket wrappers, rather than librt's weak ENOSYS fallbacks.
+	target_link_libraries(Common net netctl sysmodule sysfs pthread)
+	set_property(TARGET Common APPEND PROPERTY INTERFACE_LINK_DEPENDS
+		"${PS3_RUNTIME}/lib/libstdc++.a" "${PS3_RUNTIME}/lib/libpthread.a"
+		"${PS3_SDK}/ppu/lib/librt.a")
+endif()
 
 if(SDL_LIB_TARGET AND TARGET SDL3::Headers)
 	target_link_libraries(Common SDL3::Headers)
@@ -430,7 +462,10 @@ if(WIN32)
 	target_link_libraries(Common winmm dsound dxguid d2d1 dwrite d3d11 Version dbghelp)
 endif()
 
-target_link_libraries(Common ${LIBZIP_LIBRARY} 7zip ${PNG_LIBRARIES} basis_universal ${ZLIB_LIBRARY} pugixml vma gason udis86 ${RT_LIB} ${ATOMIC_LIB})
+target_link_libraries(Common ${LIBZIP_LIBRARY} 7zip ${PNG_LIBRARIES} basis_universal ${ZLIB_LIBRARY} pugixml gason udis86 ${RT_LIB} ${ATOMIC_LIB})
+if(NOT NO_GL_BUILD)
+	target_link_libraries(Common vma)
+endif()
 
 # ZIMLoad.cpp/ZIMSave.cpp, Serializer.cpp, and Render/TextureAtlas.cpp call directly into zstd.
 if(USE_SYSTEM_ZSTD)

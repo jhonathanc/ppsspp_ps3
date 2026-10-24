@@ -58,6 +58,7 @@ static int CommonDecompress(int windowBits, u32 OutBuffer, int OutBufferLength, 
 		*crc32Addr = crc32(crc, outBufferPtr, stream.total_out);
 	}
 
+	GeListWatchWrite(OutBuffer, stream.total_out, "sceDeflt");
 	if (MemBlockInfoDetailed(stream.total_in, stream.total_out)) {
 		char tagData[128];
 		size_t tagSize = FormatMemWriteTagAt(tagData, sizeof(tagData), "sceDeflt/", InBuffer, stream.total_in);

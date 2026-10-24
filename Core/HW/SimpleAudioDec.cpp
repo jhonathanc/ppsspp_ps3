@@ -15,6 +15,7 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include "GPU/PS3Profile.h"
 #include <algorithm>
 #include <cmath>
 
@@ -246,7 +247,12 @@ FFmpegAudioDecoder::~FFmpegAudioDecoder() {
 
 // Decodes a single input frame.
 bool FFmpegAudioDecoder::Decode(const uint8_t *inbuf, int inbytes, int *inbytesConsumed, int outputChannels, int16_t *outbuf, int *outSamples) {
+	PS3_PROFILE(audioDecode);
 #ifdef USE_FFMPEG
+	// Videos off for this game (setting "videos"; auto: Killzone): every FFmpeg-only codec (AAC,
+	// MP3) fails as in a build without FFmpeg, so the game sees exactly what that build shows it.
+	if (!MediaVideoDecodeEnabled())
+		return false;
 	if (!codecOpen_) {
 		OpenCodec(inbytes);
 		if (!codecOpen_) {
@@ -466,6 +472,7 @@ u32 AuCtx::AuDecode(u32 pcmAddr) {
 		int inbytesConsumed = 0;
 		int outSamples = 0;
 		decoder->Decode(&sourcebuff[nextSync], (int)sourcebuff.size() - nextSync, &inbytesConsumed, 2, (int16_t *)outbuf, &outSamples);
+		ConvertAudioSamplesToGuest(outbuf, outSamples * 2);
 		outpcmbufsize = outSamples * 2 * sizeof(int16_t);
 
 		if (outpcmbufsize == 0) {

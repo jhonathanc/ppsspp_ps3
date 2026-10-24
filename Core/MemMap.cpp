@@ -385,13 +385,23 @@ bool MemoryMap_Setup(MemMapSetupFlags flags) {
 #if !PPSSPP_PLATFORM(UWP)
 		base = g_arena.Find4GBBase();
 		if (!base) {
+#if PPSSPP_PLATFORM(PS3)
+			g_arena.ReleaseSpace();
+#endif
 			return false;
 		}
 #endif
 	}
 
 	// Should return true...
-	return Memory_TryBase(flags);
+	bool success = Memory_TryBase(flags);
+#if PPSSPP_PLATFORM(PS3)
+	if (!success) {
+		g_arena.ReleaseSpace();
+		base = nullptr;
+	}
+#endif
+	return success;
 }
 
 void MemoryMap_Shutdown() {

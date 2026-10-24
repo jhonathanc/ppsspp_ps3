@@ -33,11 +33,11 @@ static int do_kirk4(KirkState *kirk, u8 *buf, int size, int type)
 	int retv;
 	u32 *header = (u32*)buf;
 
-	header[0] = 4;
-	header[1] = 0;
-	header[2] = 0;
-	header[3] = type;
-	header[4] = size;
+	kirk_write32le(&header[0], 4);
+	kirk_write32le(&header[1], 0);
+	kirk_write32le(&header[2], 0);
+	kirk_write32le(&header[3], type);
+	kirk_write32le(&header[4], size);
 
 	retv = kirk_sceUtilsBufferCopyWithRange(kirk, buf, size+0x14, buf, size, 4);
 
@@ -52,11 +52,11 @@ static int do_kirk7(KirkState *kirk, u8 *buf, int size, int type)
 	int retv;
 	u32 *header = (u32*)buf;
 
-	header[0] = 5;
-	header[1] = 0;
-	header[2] = 0;
-	header[3] = type;
-	header[4] = size;
+	kirk_write32le(&header[0], 5);
+	kirk_write32le(&header[1], 0);
+	kirk_write32le(&header[2], 0);
+	kirk_write32le(&header[3], type);
+	kirk_write32le(&header[4], size);
 
 	retv = kirk_sceUtilsBufferCopyWithRange(kirk, buf, size+0x14, buf, size, 7);
 	if(retv)
@@ -70,11 +70,11 @@ static int kirk5(KirkState *kirk, u8 *buf, int size)
 	int retv;
 	u32 *header = (u32*)buf;
 
-	header[0] = 4;
-	header[1] = 0;
-	header[2] = 0;
-	header[3] = 0x0100;
-	header[4] = size;
+	kirk_write32le(&header[0], 4);
+	kirk_write32le(&header[1], 0);
+	kirk_write32le(&header[2], 0);
+	kirk_write32le(&header[3], 0x0100);
+	kirk_write32le(&header[4], size);
 
 	retv = kirk_sceUtilsBufferCopyWithRange(kirk, buf, size+0x14, buf, size, 5);
 	if(retv)
@@ -88,11 +88,11 @@ static int kirk8(KirkState *kirk, u8 *buf, int size)
 	int retv;
 	u32 *header = (u32*)buf;
 
-	header[0] = 5;
-	header[1] = 0;
-	header[2] = 0;
-	header[3] = 0x0100;
-	header[4] = size;
+	kirk_write32le(&header[0], 5);
+	kirk_write32le(&header[1], 0);
+	kirk_write32le(&header[2], 0);
+	kirk_write32le(&header[3], 0x0100);
+	kirk_write32le(&header[4], size);
 
 	retv = kirk_sceUtilsBufferCopyWithRange(kirk, buf, size+0x14, buf, size, 8);
 	if(retv)
@@ -426,12 +426,12 @@ static int sub_428(KirkState *kirk, u8 *kbuf, u8 *dbuf, int size, CIPHER_KEY *ck
 		memset(tmp1, 0, 0x10);
 	}else{
 		memcpy(tmp1, tmp2, 0x10);
-		*(u32*)(tmp1+0x0c) = ckey->seed-1;
+		kirk_write32le(tmp1+0x0c, (u32)(ckey->seed-1));
 	}
 
 	for(i=0; i<size; i+=16){
 		memcpy(kbuf+0x14+i, tmp2, 12);
-		*(u32*)(kbuf+0x14+i+12) = ckey->seed;
+		kirk_write32le(kbuf+0x14+i+12, (u32)ckey->seed);
 		ckey->seed += 1;
 	}
 
@@ -611,8 +611,8 @@ PGD_DESC *pgd_open(KirkState *kirk, u8 *pgd_buf, int pgd_flag, u8 *pgd_vkey)
 	pgd = (PGD_DESC*)malloc(sizeof(PGD_DESC));
 	memset(pgd, 0, sizeof(PGD_DESC));
 
-	pgd->key_index = *(u32*)(pgd_buf+4);
-	pgd->drm_type  = *(u32*)(pgd_buf+8);
+	pgd->key_index = kirk_read32le(pgd_buf+4);
+	pgd->drm_type  = kirk_read32le(pgd_buf+8);
 
 	if(pgd->drm_type==1){
 		pgd->mac_type = 1;
@@ -673,9 +673,9 @@ PGD_DESC *pgd_open(KirkState *kirk, u8 *pgd_buf, int pgd_flag, u8 *pgd_vkey)
 	sceDrmBBCipherUpdate(kirk, &ckey, pgd_buf+0x30, 0x30);
 	sceDrmBBCipherFinal(&ckey);
 
-	pgd->data_size   = *(u32*)(pgd_buf+0x44);
-	pgd->block_size  = *(u32*)(pgd_buf+0x48);
-	pgd->data_offset = *(u32*)(pgd_buf+0x4c);
+	pgd->data_size   = kirk_read32le(pgd_buf+0x44);
+	pgd->block_size  = kirk_read32le(pgd_buf+0x48);
+	pgd->data_offset = kirk_read32le(pgd_buf+0x4c);
 	memcpy(pgd->dkey, pgd_buf+0x30, 16);
 
 	if(!pgd_valid_block_size(pgd->block_size)){

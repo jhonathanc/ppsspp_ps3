@@ -98,12 +98,21 @@ void GranularMixer::Mix(s16 *samples, u32 num_samples, int outSampleRate, float 
 		inSampleRate *= emulation_speed;
 
 	const double base = static_cast<double>(1 << GRANULE_FRAC_BITS);
+#if PPSSPP_PLATFORM(PS3)
+	const u32 index_jump = ::lround(base * inSampleRate / out_sample_rate);
+#else
 	const u32 index_jump = std::lround(base * inSampleRate / out_sample_rate);
+#endif
 
 	// These fade in / out multiplier are tuned to match a constant
 	// fade speed regardless of the input or the output sample rate.
+#if PPSSPP_PLATFORM(PS3)
+	const float fade_in_mul = -::expm1(-1.0 / (out_sample_rate * FADE_IN_RC));
+	const float fade_out_mul = -::expm1(-1.0 / (out_sample_rate * FADE_OUT_RC));
+#else
 	const float fade_in_mul = -std::expm1(-1.0 / (out_sample_rate * FADE_IN_RC));
 	const float fade_out_mul = -std::expm1(-1.0 / (out_sample_rate * FADE_OUT_RC));
+#endif
 
 	// Calculate the ideal length of the granule queue.
 	// NOTE: We must have enough room here for 20fps games, generating all their audio
@@ -111,7 +120,11 @@ void GranularMixer::Mix(s16 *samples, u32 num_samples, int outSampleRate, float 
 	// However, in case of faster framerates, we should apply some pressure to reduce this. And if real clock sync
 	// is on, we should also be able to get away with a shorter buffer here.
 	// const u32 buffer_size_ms = frameTimeEstimate_ * 44100.0f;
+#if PPSSPP_PLATFORM(PS3)
+	const u32 buffer_size_samples = smoothedReadSize_ * 4 + ::llround(frameTimeEstimate_ * inSampleRate);
+#else
 	const u32 buffer_size_samples = smoothedReadSize_ * 4 + std::llround(frameTimeEstimate_ * inSampleRate);
+#endif
 	queuedSamplesTarget_ = buffer_size_samples;
 
 	// Limit the possible queue sizes to any number between 4 and 64.

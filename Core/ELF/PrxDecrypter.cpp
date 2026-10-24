@@ -900,11 +900,11 @@ static bool KirkOutputFits(u32 headerSize, u32 dataOffset, u32 dataSize, u32 siz
 }
 
 static bool KirkOutputFits(const KIRK_CMD1_HEADER *header, u32 size) {
-	return KirkOutputFits(sizeof(KIRK_CMD1_HEADER), header->data_offset, header->data_size, size);
+	return KirkOutputFits(sizeof(KIRK_CMD1_HEADER), kirk_read32le(&header->data_offset), kirk_read32le(&header->data_size), size);
 }
 
 static bool KirkOutputFits(const KIRK_CMD1_ECDSA_HEADER *header, u32 size) {
-	return KirkOutputFits(sizeof(KIRK_CMD1_ECDSA_HEADER), header->data_offset, header->data_size, size);
+	return KirkOutputFits(sizeof(KIRK_CMD1_ECDSA_HEADER), kirk_read32le(&header->data_offset), kirk_read32le(&header->data_size), size);
 }
 
 static int pspDecryptType0(KirkState *kirk, const u8 *inbuf, u8 *outbuf, u32 size) {
@@ -920,7 +920,9 @@ static int pspDecryptType0(KirkState *kirk, const u8 *inbuf, u8 *outbuf, u32 siz
 	// no need to expand seed, and no need to decrypt
 	// normally this would be a kirk7 op, but we have the seed pre-decrypted
 	std::array<u8, 0x90> xorbuf;
-	memcpy(xorbuf.data(), reinterpret_cast<const u8 *>(pti->key), xorbuf.size());
+	// The legacy tables hold numeric words, not host-order key bytes.
+	for (size_t i = 0; i < xorbuf.size() / sizeof(u32); ++i)
+		kirk_write32le(xorbuf.data() + i * sizeof(u32), pti->key[i]);
 	if (pti->scrambleKey)
 	{
 		// ...except for keys we have in their raw form, which need that pass after all.
@@ -984,7 +986,9 @@ static int pspDecryptType1(KirkState *kirk, const u8 *inbuf, u8 *outbuf, u32 siz
 	// no need to expand seed, and no need to decrypt
 	// normally this would be a kirk7 op, but we have the seed pre-decrypted
 	std::array<u8, 0x90> xorbuf;
-	memcpy(xorbuf.data(), reinterpret_cast<const u8 *>(pti->key), xorbuf.size());
+	// The legacy tables hold numeric words, not host-order key bytes.
+	for (size_t i = 0; i < xorbuf.size() / sizeof(u32); ++i)
+		kirk_write32le(xorbuf.data() + i * sizeof(u32), pti->key[i]);
 
 	// construct the header format for a type 1 prx
 	PRXType1 type1(inbuf);
@@ -1084,7 +1088,7 @@ static int pspDecryptType2(KirkState *kirk, const u8 *inbuf, u8 *outbuf, u32 siz
 	memcpy(reinterpret_cast<u8*>(&header->data_size), type2.kirkMetadata, sizeof(type2.kirkMetadata));
 	memcpy(reinterpret_cast<u8*>(header)+sizeof(KIRK_CMD1_HEADER), type2.prxHeader, sizeof(type2.prxHeader));
 	decryptKirkHeader(reinterpret_cast<u8*>(header), type2.kirkHeader, xorbuf.cbegin()+0x10, pti->code);
-	header->mode = 1;
+	kirk_write32le(&header->mode, 1);
 
 	if (!KirkOutputFits(header, size))
 	{
@@ -1135,7 +1139,7 @@ static int pspFinishType5(KirkState *kirk, const u8 *inbuf, u8 *outbuf, u32 size
 	memcpy(reinterpret_cast<u8*>(&header->data_size), type5.kirkMetadata, sizeof(type5.kirkMetadata));
 	memcpy(reinterpret_cast<u8*>(header)+sizeof(KIRK_CMD1_HEADER), type5.prxHeader, sizeof(type5.prxHeader));
 	decryptKirkHeader(reinterpret_cast<u8*>(header), type5.kirkHeader, xorbuf.cbegin()+0x10, code);
-	header->mode = 1;
+	kirk_write32le(&header->mode, 1);
 
 	if (!KirkOutputFits(header, size))
 	{
@@ -1260,7 +1264,7 @@ static int pspDecryptType6(KirkState *kirk, const u8 *inbuf, u8 *outbuf, u32 siz
 	memcpy(reinterpret_cast<u8*>(&header->data_size), type6.kirkMetadata, sizeof(type6.kirkMetadata));
 	memcpy(reinterpret_cast<u8*>(header)+sizeof(KIRK_CMD1_ECDSA_HEADER), type6.prxHeader, sizeof(type6.prxHeader));
 	decryptKirkHeader(reinterpret_cast<u8*>(header), type6.kirkHeader, xorbuf.cbegin()+0x10, pti->code);
-	header->mode = 1;
+	kirk_write32le(&header->mode, 1);
 	header->ecdsa_hash = 1;
 
 	if (!KirkOutputFits(header, size))
@@ -1334,7 +1338,7 @@ static int pspDecryptType9(KirkState *kirk, const u8 *inbuf, u8 *outbuf, u32 siz
 	memcpy(reinterpret_cast<u8*>(&header->data_size), type9.kirkMetadata, sizeof(type9.kirkMetadata));
 	memcpy(reinterpret_cast<u8*>(header)+sizeof(KIRK_CMD1_ECDSA_HEADER), type9.prxHeader, sizeof(type9.prxHeader));
 	decryptKirkHeader(reinterpret_cast<u8*>(header), type9.kirkHeader, xorbuf.cbegin()+0x10, pti->code);
-	header->mode = 1;
+	kirk_write32le(&header->mode, 1);
 	// Left at 0, unlike type 6/7 which set it: type 9 carries a real ECDSA signature that was
 	// verified separately, so KIRK is not asked to hash-check this block. JPCSP's equivalent
 	// branch only writes the mode word and zeroes the rest of that region.
@@ -1382,33 +1386,40 @@ int pspDecryptPRX(const u8 *inbuf, u8 *outbuf, u32 size, const u8 *seed, const u
 	// and their appropriate prx types
 	// since we don't know the PRX type we attempt a decrypt using all
 	auto res = pspDecryptType0(&kirk, inbuf, outbuf, size);
+	INFO_LOG(Log::Loader, "PRX tag=%08x type=0 result=%d", (u32)*(const u32_le *)(inbuf + 0xD0), res);
 
 	if (res >= 0)
 		return res;
 	
 	res = pspDecryptType1(&kirk, inbuf, outbuf, size);
+	INFO_LOG(Log::Loader, "PRX tag=%08x type=1 result=%d", (u32)*(const u32_le *)(inbuf + 0xD0), res);
 
 	if (res >= 0)
 		return res;
 	
 	res = pspDecryptType2(&kirk, inbuf, outbuf, size);
+	INFO_LOG(Log::Loader, "PRX tag=%08x type=2 result=%d", (u32)*(const u32_le *)(inbuf + 0xD0), res);
 
 	if (res >= 0)
 		return res;
 	
 	res = pspDecryptType5(&kirk, inbuf, outbuf, size, seed);
+	INFO_LOG(Log::Loader, "PRX tag=%08x type=5 result=%d", (u32)*(const u32_le *)(inbuf + 0xD0), res);
 
 	if (res >= 0)
 		return res;
 
 	res = pspDecryptType6(&kirk, inbuf, outbuf, size);
+	INFO_LOG(Log::Loader, "PRX tag=%08x type=6 result=%d", (u32)*(const u32_le *)(inbuf + 0xD0), res);
 
 	if (res >= 0)
 		return res;
 
 	// Last, because its header check is a subset of type 6's - a genuine type 6 PRX would pass it
 	// and then fail on the hash, so trying it earlier would shadow the real answer.
-	return pspDecryptType9(&kirk, inbuf, outbuf, size);
+	res = pspDecryptType9(&kirk, inbuf, outbuf, size);
+	INFO_LOG(Log::Loader, "PRX tag=%08x type=9 result=%d", (u32)*(const u32_le *)(inbuf + 0xD0), res);
+	return res;
 }
 
 bool pspUnwrapDNASPGD(std::vector<u8> &data, const u8 *secureId, const u32 *fuseId)

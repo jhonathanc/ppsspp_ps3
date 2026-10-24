@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <cmath>
 #include <cstdio>
+#include <climits>
 
 #include "Common/CommonTypes.h"
 #include "Common/Net/SocketCompat.h"
@@ -13,6 +14,18 @@
 namespace fd_util {
 
 bool WaitUntilReady(int fd, double timeout, bool for_write) {
+#if PPSSPP_PLATFORM(PS3)
+	// PSL1GHT socket handles include SOCKET_FD_MASK. Its poll wrapper strips
+	// that tag; FD_SET would instead index past the end of the SDK's fd_set.
+	if (fd < 0 || !std::isfinite(timeout) || timeout < 0.0) {
+		return false;
+	}
+	pollfd descriptor{fd, (short)(for_write ? POLLOUT : POLLIN), 0};
+	int milliseconds = timeout >= INT_MAX / 1000.0 ? INT_MAX : (int)ceil(timeout * 1000.0);
+	int result = poll(&descriptor, 1, milliseconds);
+	return result > 0 && !(descriptor.revents & POLLNVAL) &&
+		(descriptor.revents & (descriptor.events | POLLERR | POLLHUP)) != 0;
+#else
 	struct timeval tv;
 	tv.tv_sec = (long)floor(timeout);
 	tv.tv_usec = (long)((timeout - floor(timeout)) * 1000000.0);
@@ -38,10 +51,16 @@ bool WaitUntilReady(int fd, double timeout, bool for_write) {
 		// Socket is ready.
 		return true;
 	}
+#endif
 }
 
 void SetNonBlocking(int sock, bool non_blocking) {
-#ifndef _WIN32
+#if PPSSPP_PLATFORM(PS3)
+	int value = non_blocking ? 1 : 0;
+	if (setsockopt(sock, SOL_SOCKET, SO_NBIO, &value, sizeof(value)) < 0) {
+		ERROR_LOG(Log::IO, "Error setting socket nonblocking status: %d", socket_errno);
+	}
+#elif !defined(_WIN32)
 	int opts = fcntl(sock, F_GETFL);
 	if (opts < 0) {
 		perror("fcntl(F_GETFL)");
@@ -69,7 +88,7 @@ std::string GetLocalIP(int sock) {
 	union {
 		struct sockaddr sa;
 		struct sockaddr_in ipv4;
-#if !PPSSPP_PLATFORM(SWITCH)
+#if !PPSSPP_PLATFORM(SWITCH) && !PPSSPP_PLATFORM(PS3)
 		struct sockaddr_in6 ipv6;
 #endif
 	} server_addr;
@@ -81,7 +100,7 @@ std::string GetLocalIP(int sock) {
 
 		// We clear the port below for WSAAddressToStringA.
 		void *addr = nullptr;
-#if !PPSSPP_PLATFORM(SWITCH)
+#if !PPSSPP_PLATFORM(SWITCH) && !PPSSPP_PLATFORM(PS3)
 		if (server_addr.sa.sa_family == AF_INET6) {
 			server_addr.ipv6.sin6_port = 0;
 			addr = &server_addr.ipv6.sin6_addr;

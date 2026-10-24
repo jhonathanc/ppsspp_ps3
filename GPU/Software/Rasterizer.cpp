@@ -36,6 +36,7 @@
 #include "GPU/Software/DrawPixel.h"
 #include "GPU/Software/GEMath.h"
 #include "GPU/Software/Rasterizer.h"
+#include "GPU/PS3Profile.h"
 #include "GPU/Software/Sampler.h"
 #include "GPU/Software/SoftGpu.h"
 #include "GPU/Software/TransformUnit.h"
@@ -117,6 +118,10 @@ void ComputeRasterizerState(RasterizerState *state) {
 	ComputePixelFuncID(&state->pixelID);
 	state->drawPixel = Rasterizer::GetSingleFunc(state->pixelID);
 	state->drawSpan = Rasterizer::GetSpanFunc(state->pixelID);
+#if PPSSPP_ARCH(POWERPC)
+	PS3Profile::geStCount++;
+	PS3Profile::Scope samplerScope(PS3Profile::geStSampler);
+#endif
 
 	state->enableTextures = gstate.isTextureMapEnabled() && !state->pixelID.clearMode;
 	if (state->enableTextures) {
@@ -780,7 +785,7 @@ static inline void ApplyTexturing(const RasterizerState &state, int *colors, int
 static inline u64 ReadDepth4(int x, int y, int stride) {
 	const uint32_t offset = depthbuf.base + (uint32_t)(x + y * stride) * 2;
 	if ((offset & 31) <= 24) {
-		u64 v;
+		u64_le v;
 		memcpy(&v, depthbuf.Get16Ptr(x, y, stride), sizeof(v));
 		return v;
 	}
@@ -2442,7 +2447,7 @@ void ClearRectangle(const VertexData &v0, const VertexData &v1, const BinCoords 
 			if (canMemsetColor) {
 				DrawingCoords p = pprime;
 				for (p.y = pprime.y; p.y <= pend.y; ++p.y) {
-					u32 *row = fb.Get32Ptr(p.x, p.y, stride);
+					u32_le *row = fb.Get32Ptr(p.x, p.y, stride);
 					memset(row, new_color, w * 4);
 				}
 			} else {
@@ -2458,7 +2463,7 @@ void ClearRectangle(const VertexData &v0, const VertexData &v1, const BinCoords 
 			if (canMemsetColor) {
 				DrawingCoords p = pprime;
 				for (p.y = pprime.y; p.y <= pend.y; ++p.y) {
-					u16 *row = fb.Get16Ptr(p.x, p.y, stride);
+					u16_le *row = fb.Get16Ptr(p.x, p.y, stride);
 					memset(row, new_color16, w * 2);
 				}
 			} else {
@@ -2876,7 +2881,7 @@ bool GetCurrentTexture(GPUDebugBuffer &buffer, int level)
 	Sampler::FetchFunc sampler = Sampler::GetFetchFunc(id);
 
 	u8 *texptr = Memory::GetPointerWriteOrException(texaddr);
-	u32 *row = (u32 *)buffer.GetData();
+	u32_le *row = (u32_le *)buffer.GetData();
 	for (int y = 0; y < h; ++y) {
 		for (int x = 0; x < w; ++x) {
 			row[x] = Vec4<int>(sampler(x, y, texptr, texbufw, level, id)).ToRGBA();

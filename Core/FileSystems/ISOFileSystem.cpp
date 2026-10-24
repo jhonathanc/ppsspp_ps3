@@ -618,7 +618,7 @@ size_t ISOFileSystem::ReadFile(u32 handle, u8 *pointer, s64 size, int &usec) {
 
 		// Okay, we have size and position, let's rock.
 		const int firstBlockOffset = positionOnIso & 2047;
-		const int firstBlockSize = firstBlockOffset == 0 ? 0 : (int)std::min(size, 2048LL - firstBlockOffset);
+		const int firstBlockSize = firstBlockOffset == 0 ? 0 : (int)std::min<s64>(size, 2048 - firstBlockOffset);
 		const int lastBlockSize = (size - firstBlockSize) & 2047;
 		const s64 middleSize = size - firstBlockSize - lastBlockSize;
 		_dbg_assert_((middleSize & 2047) == 0);

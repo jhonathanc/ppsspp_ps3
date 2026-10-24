@@ -194,7 +194,7 @@ void AfterApctlMipsCall::DoState(PointerWrap & p) {
 
 void AfterApctlMipsCall::run(MipsCall& call) {
 	u32 v0 = currentMIPS->r[MIPS_REG_V0];
-	DEBUG_LOG(Log::sceNet, "AfterApctlMipsCall::run [ID=%i][OldState=%d][NewState=%d][Event=%d][Error=%d][ArgsPtr=%08x] [cbId: %u][retV0: %08x]", handlerID, oldState, newState, event, error, argsAddr, call.cbId, v0);
+	DEBUG_LOG(Log::sceNet, "AfterApctlMipsCall::run [ID=%i][OldState=%d][NewState=%d][Event=%d][Error=%d][ArgsPtr=%08x] [cbId: %u][retV0: %08x]", handlerID, oldState, newState, event, error, (unsigned int)argsAddr, call.cbId, v0);
 	//call.setReturnValue(v0);
 }
 
@@ -812,7 +812,7 @@ void __NetApctlCallbacks()
 
 	// How AP works probably like this: Game use sceNetApctl function -> sceNetApctl let the hardware know and do their's thing and have a new State -> Let the game know the resulting State through Event on their handler
 	if (!apctlEvents.empty()) {
-		auto& args = apctlEvents.front();
+		auto args = apctlEvents.front();
 		auto& oldState = args.data[0];
 		auto& newState = args.data[1];
 		auto& event = args.data[2];
@@ -920,11 +920,14 @@ void __NetApctlCallbacks()
 
 		// Run mipscall. Should we skipped executing the mipscall if oldState == newState? 
 		for (std::map<int, ApctlHandler>::iterator it = apctlHandlers.begin(); it != apctlHandlers.end(); ++it) {
-			DEBUG_LOG(Log::sceNet, "ApctlCallback [ID=%i][OldState=%d][NewState=%d][Event=%d][Error=%08x][ArgsPtr=%08x]", it->first, oldState, newState, event, error, it->second.argument);
+			DEBUG_LOG(Log::sceNet, "ApctlCallback [ID=%i][OldState=%d][NewState=%d][Event=%d][Error=%08x][ArgsPtr=%08x]", it->first, (int)oldState, (int)newState, (int)event, (unsigned int)error, it->second.argument);
 			args.data[4] = it->second.argument;
 			AfterApctlMipsCall* after = (AfterApctlMipsCall*)__KernelCreateAction(actionAfterApctlMipsCall);
 			after->SetData(it->first, oldState, newState, event, error, it->second.argument);
-			hleEnqueueCall(it->second.entryPoint, 5, args.data, after);
+			u32 callArgs[5];
+			for (int i = 0; i < 5; ++i)
+				callArgs[i] = args.data[i];
+			hleEnqueueCall(it->second.entryPoint, 5, callArgs, after);
 		}
 		// Similar to Adhocctl, new State might need to be set after delayed, right before executing the mipscall (ie. simulated beforeAction)
 		ScheduleApctlState(event, newState, delayus, "apctl callback state");

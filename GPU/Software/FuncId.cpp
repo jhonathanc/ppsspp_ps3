@@ -270,6 +270,10 @@ void ComputePixelFuncID(PixelFuncID *id) {
 
 void ComputeSamplerID(SamplerID *id_out) {
 	SamplerID id{};
+	// The constructor only clears the key: the sizes past the last mip level (and the padding)
+	// would be stack garbage, which made equal states compare different (draw merging, caches).
+	memset(&id.cached, 0, sizeof(id.cached));
+	id.pad = 0;
 
 	id.useStandardBufw = true;
 	id.overReadSafe = true;

@@ -158,6 +158,7 @@ static int Replace_memcpy(MIPSState *mips) {
 	}
 	RETURN(destPtr);
 
+	GeListWatchWrite(destPtr, bytes, "ReplaceMemcpy");
 	if (MemBlockInfoDetailed(bytes)) {
 		// It's pretty common that games will copy video data.
 		// Detect that by manually reading the tag when the size looks right.
@@ -231,6 +232,7 @@ static int Replace_memcpy_jak(MIPSState *mips) {
 		RETURN(destPtr);
 	}
 
+	GeListWatchWrite(destPtr, bytes, "ReplaceMemcpy");
 	if (MemBlockInfoDetailed(bytes)) {
 		// It's pretty common that games will copy video data.
 		// Detect that by manually reading the tag when the size looks right.
@@ -276,6 +278,7 @@ static int Replace_memcpy16(MIPSState *mips) {
 	}
 	RETURN(destPtr);
 
+	GeListWatchWrite(destPtr, bytes, "ReplaceMemcpy16/");
 	if (MemBlockInfoDetailed(bytes)) {
 		NotifyMemInfoCopy(destPtr, srcPtr, bytes, "ReplaceMemcpy16/");
 	}
@@ -315,6 +318,7 @@ static int Replace_memcpy_swizzled(MIPSState *mips) {
 
 	RETURN(0);
 
+	GeListWatchWrite(destPtr, pitch * h, "ReplaceMemcpySwizzle/");
 	if (MemBlockInfoDetailed(pitch * h)) {
 		NotifyMemInfoCopy(destPtr, srcPtr, pitch * h, "ReplaceMemcpySwizzle/");
 	}
@@ -343,6 +347,7 @@ static int Replace_memmove(MIPSState *mips) {
 	}
 	RETURN(destPtr);
 
+	GeListWatchWrite(destPtr, bytes, "ReplaceMemmove/");
 	if (MemBlockInfoDetailed(bytes)) {
 		NotifyMemInfoCopy(destPtr, srcPtr, bytes, "ReplaceMemmove/");
 	}

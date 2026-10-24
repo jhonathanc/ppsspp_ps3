@@ -1,3 +1,4 @@
+#include <atomic>
 // Copyright (c) 2012- PPSSPP Project.
 
 // This program is free software: you can redistribute it and/or modify
@@ -419,12 +420,12 @@ int SavedataParam::Save(SceUtilitySavedataParam* param, const std::string &saveD
 		return SCE_UTILITY_SAVEDATA_ERROR_SAVE_MS_NOSPACE;
 	}
 	if (param->dataSize > param->dataBufSize) {
-		ERROR_LOG_REPORT(Log::sceUtility, "Savedata buffer overflow: %d / %d", param->dataSize, param->dataBufSize);
+		ERROR_LOG_REPORT(Log::sceUtility, "Savedata buffer overflow: %d / %d", (int)param->dataSize, (int)param->dataBufSize);
 		return SCE_UTILITY_SAVEDATA_ERROR_RW_BAD_PARAMS;
 	}
 	auto validateSize = [](const PspUtilitySavedataFileData &data) {
 		if (data.buf.IsValid() && data.bufSize < data.size) {
-			ERROR_LOG_REPORT(Log::sceUtility, "Savedata subdata buffer overflow: %d / %d", data.size, data.bufSize);
+			ERROR_LOG_REPORT(Log::sceUtility, "Savedata subdata buffer overflow: %d / %d", (int)data.size, (int)data.bufSize);
 			return false;
 		}
 		return true;
@@ -434,13 +435,13 @@ int SavedataParam::Save(SceUtilitySavedataParam* param, const std::string &saveD
 	}
 
 	if (param->secureVersion > 3) {
-		ERROR_LOG_REPORT(Log::sceUtility, "Savedata version requested on save: %d", param->secureVersion);
+		ERROR_LOG_REPORT(Log::sceUtility, "Savedata version requested on save: %d", (int)param->secureVersion);
 		return SCE_UTILITY_SAVEDATA_ERROR_SAVE_PARAM;
 	} else if (secureMode && MissingRequiredKey(param)) {
-		ERROR_LOG_REPORT(Log::sceUtility, "Savedata version with missing key on save: %d", param->secureVersion);
+		ERROR_LOG_REPORT(Log::sceUtility, "Savedata version with missing key on save: %d", (int)param->secureVersion);
 		return SCE_UTILITY_SAVEDATA_ERROR_SAVE_PARAM;
 	} else if (param->secureVersion != 0) {
-		INFO_LOG(Log::sceUtility, "Savedata version requested on save: %d", param->secureVersion);
+		INFO_LOG(Log::sceUtility, "Savedata version requested on save: %d", (int)param->secureVersion);
 	}
 
 	std::string dirPath = GetSaveFilePath(param, GetSaveDir(param, saveDirName));
@@ -671,13 +672,13 @@ int SavedataParam::Load(SceUtilitySavedataParam *param, const std::string &saveD
 
 int SavedataParam::LoadSaveData(SceUtilitySavedataParam *param, const std::string &saveDirName, const std::string &dirPath, bool secureMode) {
 	if (param->secureVersion > 3) {
-		ERROR_LOG_REPORT(Log::sceUtility, "Savedata version requested: %d", param->secureVersion);
+		ERROR_LOG_REPORT(Log::sceUtility, "Savedata version requested: %d", (int)param->secureVersion);
 		return SCE_UTILITY_SAVEDATA_ERROR_LOAD_PARAM;
 	} else if (secureMode && MissingRequiredKey(param)) {
-		ERROR_LOG_REPORT(Log::sceUtility, "Savedata version with missing key: %d", param->secureVersion);
+		ERROR_LOG_REPORT(Log::sceUtility, "Savedata version with missing key: %d", (int)param->secureVersion);
 		return SCE_UTILITY_SAVEDATA_ERROR_LOAD_PARAM;
 	} else if (param->secureVersion != 0) {
-		WARN_LOG_REPORT(Log::sceUtility, "Savedata version requested: %d", param->secureVersion);
+		WARN_LOG_REPORT(Log::sceUtility, "Savedata version requested: %d", (int)param->secureVersion);
 	}
 
 	std::string filename = GetFileName(param);
@@ -687,7 +688,7 @@ int SavedataParam::LoadSaveData(SceUtilitySavedataParam *param, const std::strin
 		return 0;
 
 	s64 readSize;
-	INFO_LOG(Log::sceUtility, "Loading file with size %u in %s", param->dataBufSize, filePath.c_str());
+	INFO_LOG(Log::sceUtility, "Loading file with size %u in %s", (unsigned int)param->dataBufSize, filePath.c_str());
 	u8 *saveData = nullptr;
 	int saveSize = -1;
 	if (!ReadPSPFile(filePath, &saveData, saveSize, &readSize)) {
@@ -919,9 +920,9 @@ void SavedataParam::LoadFile(const std::string& dirPath, const std::string& file
 		fileData->size = readSize;
 		const std::string tag = "SavedataLoad/" + filePath;
 		NotifyMemInfo(MemBlockFlags::WRITE, fileData->buf.ptr, fileData->size, tag.c_str(), tag.size());
-		INFO_LOG(Log::sceUtility, "Loaded subfile %s (size: %d bytes) into %08x", filePath.c_str(), fileData->size, fileData->buf.ptr);
+		INFO_LOG(Log::sceUtility, "Loaded subfile %s (size: %d bytes) into %08x", filePath.c_str(), (int)fileData->size, (unsigned int)fileData->buf.ptr);
 	} else {
-		WARN_LOG(Log::sceUtility, "Failed to load subfile %s into %08x", filePath.c_str(), fileData->buf.ptr);
+		WARN_LOG(Log::sceUtility, "Failed to load subfile %s into %08x", filePath.c_str(), (unsigned int)fileData->buf.ptr);
 	}
 }
 
@@ -1117,6 +1118,8 @@ inline std::string FmtPspTime(const ScePspDateTime &dt) {
 	return StringFromFormat("%04d-%02d-%02d %02d:%02d:%02d.%06d", dt.year, dt.month, dt.day, dt.hour, dt.minute, dt.second, dt.microsecond);
 }
 
+extern std::atomic<const char *> g_saveIOStage;
+
 int SavedataParam::GetSizes(SceUtilitySavedataParam *param) {
 	if (!param) {
 		return SCE_UTILITY_SAVEDATA_ERROR_SIZES_NO_DATA;
@@ -1125,6 +1128,7 @@ int SavedataParam::GetSizes(SceUtilitySavedataParam *param) {
 	int ret = 0;
 	if (param->msFree.IsValid())
 	{
+		g_saveIOStage = "sizes: free space";
 		const u64 freeBytes = MemoryStick_FreeSpace(GetGameName(param));
 		param->msFree->clusterSize = (u32)MemoryStick_SectorSize();
 		param->msFree->freeClusters = (u32)(freeBytes / MemoryStick_SectorSize());
@@ -1142,6 +1146,7 @@ int SavedataParam::GetSizes(SceUtilitySavedataParam *param) {
 		// TODO: How should <> be handled?
 		std::string path = GetSaveFilePath(param, gameName + (saveName == "<>" ? "" : saveName));
 		bool listingExists = false;
+		g_saveIOStage = "sizes: listing the save's folder";
 		auto listing = pspFileSystem.GetDirListing(path, &listingExists);
 		if (listingExists) {
 			param->msData->info.usedClusters = 0;
@@ -1173,6 +1178,7 @@ int SavedataParam::GetSizes(SceUtilitySavedataParam *param) {
 	}
 	if (param->utilityData.IsValid())
 	{
+		g_saveIOStage = "sizes: size of a new save";
 		int total_size = 0;
 
 		// The directory record itself.
@@ -1206,8 +1212,8 @@ int SavedataParam::GetSizes(SceUtilitySavedataParam *param) {
 		memset(param->utilityData->usedSpace32Str, 0, sizeof(param->utilityData->usedSpace32Str));
 		strncpy(param->utilityData->usedSpace32Str, spaceTxt32.c_str(), sizeof(param->utilityData->usedSpace32Str));
 
-		INFO_LOG(Log::sceUtility, "GetSize: usedSpaceKB: %d (str: %s) (clusters: %d)", param->utilityData->usedSpaceKB, spaceTxt.c_str(), param->utilityData->usedClusters);
-		INFO_LOG(Log::sceUtility, "GetSize: usedSpace32KB: %d (str32: %s)", param->utilityData->usedSpace32KB, spaceTxt32.c_str());
+		INFO_LOG(Log::sceUtility, "GetSize: usedSpaceKB: %d (str: %s) (clusters: %d)", (int)param->utilityData->usedSpaceKB, spaceTxt.c_str(), (int)param->utilityData->usedClusters);
+		INFO_LOG(Log::sceUtility, "GetSize: usedSpace32KB: %d (str32: %s)", (int)param->utilityData->usedSpace32KB, spaceTxt32.c_str());
 
 		NotifyMemInfo(MemBlockFlags::WRITE, param->utilityData.ptr, sizeof(SceUtilitySavedataUsedDataInfo), "SavedataGetSizes");
 	}
@@ -1274,10 +1280,10 @@ bool SavedataParam::GetList(SceUtilitySavedataParam *param)
 		param->idList->resultCount = (u32)validDir.size();
 		// Log out the listing.
 		if (GenericLogEnabled(Log::sceUtility, LogLevel::LINFO)) {
-			INFO_LOG(Log::sceUtility, "LIST (searchstring=%s): %d files (max: %d)", searchString.c_str(), param->idList->resultCount, maxFileCount);
+			INFO_LOG(Log::sceUtility, "LIST (searchstring=%s): %d files (max: %d)", searchString.c_str(), (int)param->idList->resultCount, maxFileCount);
 			for (size_t i = 0; i < validDir.size(); i++) {
 				NOTICE_LOG(Log::sceUtility, "LIST %s: mode %08x, ctime: %s, atime: %s, mtime: %s",
-					entries[i].name, entries[i].st_mode, FmtPspTime(entries[i].st_ctime).c_str(), FmtPspTime(entries[i].st_atime).c_str(), FmtPspTime(entries[i].st_mtime).c_str());
+					entries[i].name, (unsigned int)entries[i].st_mode, FmtPspTime(entries[i].st_ctime).c_str(), FmtPspTime(entries[i].st_atime).c_str(), FmtPspTime(entries[i].st_mtime).c_str());
 			}
 		}
 		NotifyMemInfo(MemBlockFlags::WRITE, param->idList.ptr, sizeof(SceUtilitySavedataIdListInfo), "SavedataGetList");
@@ -1292,23 +1298,23 @@ int SavedataParam::GetFilesList(SceUtilitySavedataParam *param, u32 requestAddr,
 	}
 
 	if (!param->fileList.IsValid()) {
-		ERROR_LOG_REPORT(Log::sceUtility, "SavedataParam::GetFilesList(): bad fileList address %08x", param->fileList.ptr);
+		ERROR_LOG_REPORT(Log::sceUtility, "SavedataParam::GetFilesList(): bad fileList address %08x", (unsigned int)param->fileList.ptr);
 		// Should crash.
 		return -1;
 	}
 
 	PSPPointer<SceUtilitySavedataFileListInfo> fileList = param->fileList;
 	if (fileList->secureEntries.IsValid() && fileList->maxSecureEntries > 99) {
-		ERROR_LOG_REPORT(Log::sceUtility, "SavedataParam::GetFilesList(): too many secure entries, %d", fileList->maxSecureEntries);
+		ERROR_LOG_REPORT(Log::sceUtility, "SavedataParam::GetFilesList(): too many secure entries, %d", (int)fileList->maxSecureEntries);
 		return SCE_UTILITY_SAVEDATA_ERROR_RW_BAD_PARAMS;
 	}
 	if (fileList->normalEntries.IsValid() && fileList->maxNormalEntries > 8192) {
-		ERROR_LOG_REPORT(Log::sceUtility, "SavedataParam::GetFilesList(): too many normal entries, %d", fileList->maxNormalEntries);
+		ERROR_LOG_REPORT(Log::sceUtility, "SavedataParam::GetFilesList(): too many normal entries, %d", (int)fileList->maxNormalEntries);
 		return SCE_UTILITY_SAVEDATA_ERROR_RW_BAD_PARAMS;
 	}
 	if (sceKernelGetCompiledSdkVersion() >= 0x02060000) {
 		if (fileList->systemEntries.IsValid() && fileList->maxSystemEntries > 5) {
-			ERROR_LOG_REPORT(Log::sceUtility, "SavedataParam::GetFilesList(): too many system entries, %d", fileList->maxSystemEntries);
+			ERROR_LOG_REPORT(Log::sceUtility, "SavedataParam::GetFilesList(): too many system entries, %d", (int)fileList->maxSystemEntries);
 			return SCE_UTILITY_SAVEDATA_ERROR_RW_BAD_PARAMS;
 		}
 	}
@@ -1401,15 +1407,15 @@ int SavedataParam::GetFilesList(SceUtilitySavedataParam *param, u32 requestAddr,
 	}
 
 	if (GenericLogEnabled(Log::sceUtility, LogLevel::LINFO)) {
-		INFO_LOG(Log::sceUtility, "FILES: %d files listed (+ %d system, %d secure)", fileList->resultNumNormalEntries, fileList->resultNumSystemEntries, fileList->resultNumSecureEntries);
+		INFO_LOG(Log::sceUtility, "FILES: %d files listed (+ %d system, %d secure)", (int)fileList->resultNumNormalEntries, (int)fileList->resultNumSystemEntries, (int)fileList->resultNumSecureEntries);
 		if (fileList->normalEntries.IsValid()) {
 			for (int i = 0; i < (int)fileList->resultNumNormalEntries; i++) {
 				const SceUtilitySavedataFileListEntry &info = fileList->normalEntries[i];
 				NOTICE_LOG(Log::sceUtility, "FILES: %s: mode %08x, ctime: %s, atime: %s, mtime: %s",
-					info.name, info.st_mode, FmtPspTime(info.st_ctime).c_str(), FmtPspTime(info.st_atime).c_str(), FmtPspTime(info.st_mtime).c_str());
+					info.name, (unsigned int)info.st_mode, FmtPspTime(info.st_ctime).c_str(), FmtPspTime(info.st_atime).c_str(), FmtPspTime(info.st_mtime).c_str());
 			}
 		} else if (fileList->resultNumNormalEntries > 0) {
-			WARN_LOG(Log::sceUtility, "Invalid normalEntries pointer (%d entries)", fileList->resultNumNormalEntries);
+			WARN_LOG(Log::sceUtility, "Invalid normalEntries pointer (%d entries)", (int)fileList->resultNumNormalEntries);
 		}
 		// TODO: Log system and secure entries?
 	}
@@ -1485,7 +1491,7 @@ bool SavedataParam::GetSize(SceUtilitySavedataParam *param) {
 		}
 
 		INFO_LOG(Log::sceUtility, "GETSIZE: SectorSize: %d FreeSectors: %d FreeKB: %d neededKb: %d overwriteKb: %d",
-			param->sizeInfo->sectorSize, param->sizeInfo->freeSectors, param->sizeInfo->freeKB, param->sizeInfo->neededKB, param->sizeInfo->overwriteKB);
+			(int)param->sizeInfo->sectorSize, (int)param->sizeInfo->freeSectors, (int)param->sizeInfo->freeKB, (int)param->sizeInfo->neededKB, (int)param->sizeInfo->overwriteKB);
 
 		NotifyMemInfo(MemBlockFlags::WRITE, param->sizeInfo.ptr, sizeof(PspUtilitySavedataSizeInfo), "SavedataGetSize");
 	}

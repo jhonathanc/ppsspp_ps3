@@ -62,7 +62,7 @@ public:
 			return 0;
 		const u32 start = header_.offsets[num];
 		// The last subfile runs to the end of the file, the rest to where the next one starts.
-		const u32 stop = num + 1 < (int)ARRAY_SIZE(header_.offsets) ? header_.offsets[num + 1] : (u32)fileSize_;
+		const u32 stop = num + 1 < (int)ARRAY_SIZE(header_.offsets) ? (u32)header_.offsets[num + 1] : (u32)fileSize_;
 		// These offsets come out of the file, so they aren't necessarily ordered or even inside it.
 		// Subtracting them blind produced a huge size from an underflow.
 		if (stop < start || stop > fileSize_)

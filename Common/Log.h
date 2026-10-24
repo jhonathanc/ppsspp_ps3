@@ -133,6 +133,8 @@ ATTR_FORMAT_PRINTF(5, 6) void GenericLog(Log type, LogLevel level, const char *f
 #define VERBOSE_LOG(t,...) do { GENERIC_LOG(t, LogLevel::LVERBOSE, __VA_ARGS__) } while (false)
 
 // Currently only actually shows a dialog box on Windows.
+// Called with each failed assert's text (PS3: the frontend writes it to launch.log).
+extern void (*g_assertLogHook)(const char *text);
 ATTR_FORMAT_PRINTF(6, 7) bool HandleAssert(bool isDebugAssert, const char *function, const char *file, int line, const char *expression, MSVC_FORMAT_PRINTF const char *format, ...);
 
 // These allow us to get a small amount of information into assert messages.

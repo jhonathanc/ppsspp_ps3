@@ -1477,6 +1477,30 @@ void DrawEngineCommon::SubmitCurve(const void *control_points, const void *indic
 	vertTypeID = GetVertTypeID(vertTypeWithIndex16, gstate.getUVGenMode());
 	int generatedBytesRead;
 	if (output.count) {
+#if COMMON_BIG_ENDIAN
+		// The vertex decoder consumes PSP byte order, including CPU-generated curves.
+		// Tessellation itself keeps native floats and indices until this boundary.
+		u16 maxIndex = 0;
+		for (int i = 0; i < output.count; ++i) {
+			const u16 index = output.indices[i];
+			maxIndex = std::max(maxIndex, index);
+			const u16_le guestIndex = index;
+			memcpy(output.indices + i, &guestIndex, sizeof(guestIndex));
+		}
+		for (int i = 0; i <= maxIndex; ++i) {
+			SimpleVertex &v = output.vertices[i];
+			auto storeFloat = [](float &field) {
+				const float_le guestFloat = field;
+				memcpy(&field, &guestFloat, sizeof(guestFloat));
+			};
+			for (float &uv : v.uv)
+				storeFloat(uv);
+			for (int c = 0; c < 3; ++c) {
+				storeFloat(v.nrm[c]);
+				storeFloat(v.pos[c]);
+			}
+		}
+#endif
 		ClipInfoFlags flags = clipInfoFlags;
 		if (predecoded) {
 			VertexDecoder *dec = GetVertexDecoder(vertTypeID);

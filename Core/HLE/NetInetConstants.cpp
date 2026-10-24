@@ -178,7 +178,11 @@ int convertSocketDomainPSP2Host(int domain) {
 	case PSP_NET_INET_AF_INET:
 		return AF_INET;
 	}
+#if PPSSPP_PLATFORM(PS3)
+	return hleLogError(Log::sceNet, -1, "Unsupported PS3 Socket Domain");
+#else
 	return hleLogError(Log::sceNet, domain, "Unknown Socket Domain");
+#endif
 }
 
 int convertSocketDomainHost2PSP(int domain) {
@@ -215,6 +219,7 @@ int convertSocketTypePSP2Host(int type) {
 	case PSP_NET_INET_SOCK_RAW:
 		// FIXME: SOCK_RAW have some restrictions on newer Windows?
 		return SOCK_RAW;
+#if !PPSSPP_PLATFORM(PS3)
 	case PSP_NET_INET_SOCK_RDM:
 		return SOCK_RDM;
 	case PSP_NET_INET_SOCK_SEQPACKET:
@@ -223,9 +228,14 @@ int convertSocketTypePSP2Host(int type) {
 		return SOCK_DGRAM;				// SOCK_RAW?
 	case PSP_NET_INET_SOCK_PACKET:
 		return SOCK_STREAM;				// SOCK_RAW?
+#endif
 	}
 
+#if PPSSPP_PLATFORM(PS3)
+	return hleLogError(Log::sceNet, -1, "Unsupported PS3 Socket Type");
+#else
 	return hleLogError(Log::sceNet, type, "Unknown Socket Type") & PSP_NET_INET_SOCK_TYPE_MASK;
+#endif
 }
 
 int convertSocketTypeHost2PSP(int type) {
@@ -237,10 +247,12 @@ int convertSocketTypeHost2PSP(int type) {
 		return PSP_NET_INET_SOCK_DGRAM;
 	case SOCK_RAW:
 		return PSP_NET_INET_SOCK_RAW;
+#if !PPSSPP_PLATFORM(PS3)
 	case SOCK_RDM:
 		return PSP_NET_INET_SOCK_RDM;
 	case SOCK_SEQPACKET:
 		return PSP_NET_INET_SOCK_SEQPACKET;
+#endif
 #if defined(CONN_DGRAM)
 	case CONN_DGRAM: // SOCK_DCCP
 		return PSP_NET_INET_SOCK_CONN_DGRAM; // PSP_NET_INET_SOCK_DCCP
@@ -280,22 +292,32 @@ int convertSocketProtoPSP2Host(int protocol) {
 		return PSP_NET_INET_IPPROTO_UNSPEC; // 0 only valid if there is only 1 protocol available for a particular domain/family and type?
 	case PSP_NET_INET_IPPROTO_ICMP:
 		return IPPROTO_ICMP;
+#if !PPSSPP_PLATFORM(PS3)
 	case PSP_NET_INET_IPPROTO_IGMP:
 		return IPPROTO_IGMP;
+#endif
 	case PSP_NET_INET_IPPROTO_TCP:
 		return IPPROTO_TCP;
+#if !PPSSPP_PLATFORM(PS3)
 	case PSP_NET_INET_IPPROTO_EGP:
 		return IPPROTO_EGP;
 	case PSP_NET_INET_IPPROTO_PUP:
 		return IPPROTO_PUP;
+#endif
 	case PSP_NET_INET_IPPROTO_UDP:
 		return IPPROTO_UDP;
+#if !PPSSPP_PLATFORM(PS3)
 	case PSP_NET_INET_IPPROTO_IDP:
 		return IPPROTO_IDP;
 	case PSP_NET_INET_IPPROTO_RAW:
 		return IPPROTO_RAW;
+#endif
 	}
+#if PPSSPP_PLATFORM(PS3)
+	return hleLogError(Log::sceNet, -1, "Unsupported PS3 Socket Protocol");
+#else
 	return hleLogError(Log::sceNet, protocol, "Unknown Socket Protocol");
+#endif
 }
 
 int convertSocketProtoHost2PSP(int protocol) {
@@ -304,20 +326,26 @@ int convertSocketProtoHost2PSP(int protocol) {
 		return PSP_NET_INET_IPPROTO_UNSPEC; // 0 only valid if there is only 1 protocol available for a particular domain/family and type?
 	case IPPROTO_ICMP:
 		return PSP_NET_INET_IPPROTO_ICMP;
+#if !PPSSPP_PLATFORM(PS3)
 	case IPPROTO_IGMP:
 		return PSP_NET_INET_IPPROTO_IGMP;
+#endif
 	case IPPROTO_TCP:
 		return PSP_NET_INET_IPPROTO_TCP;
+#if !PPSSPP_PLATFORM(PS3)
 	case IPPROTO_EGP:
 		return PSP_NET_INET_IPPROTO_EGP;
 	case IPPROTO_PUP:
 		return PSP_NET_INET_IPPROTO_PUP;
+#endif
 	case IPPROTO_UDP:
 		return PSP_NET_INET_IPPROTO_UDP;
+#if !PPSSPP_PLATFORM(PS3)
 	case IPPROTO_IDP:
 		return PSP_NET_INET_IPPROTO_IDP;
 	case IPPROTO_RAW:
 		return PSP_NET_INET_IPPROTO_RAW;
+#endif
 	}
 	return hleLogError(Log::sceNet, protocol, "Unknown Socket Protocol");
 }
@@ -415,7 +443,11 @@ int convertSockoptLevelPSP2Host(int level) {
 	case PSP_NET_INET_SOL_SOCKET:
 		return SOL_SOCKET;
 	}
+#if PPSSPP_PLATFORM(PS3)
+	return hleLogError(Log::sceNet, -1, "Unsupported PS3 SockOpt Level");
+#else
 	return hleLogError(Log::sceNet, level, "Unknown SockOpt Level");
+#endif
 }
 
 int convertSockoptLevelHost2PSP(int level) {
@@ -449,10 +481,12 @@ std::string inetSockoptLevel2str(int level) {
 int convertSockoptNamePSP2Host(int optname, int level) {
 	if (level == PSP_NET_INET_IPPROTO_TCP) {
 		switch (optname) {
+#if !PPSSPP_PLATFORM(PS3)
 		case PSP_NET_INET_TCP_NODELAY:
 			return TCP_NODELAY;
 		case PSP_NET_INET_TCP_MAXSEG:
 			return TCP_MAXSEG;
+#endif
 		}
 	} else if (level == PSP_NET_INET_IPPROTO_IP) {
 		switch (optname) {
@@ -509,16 +543,20 @@ int convertSockoptNamePSP2Host(int optname, int level) {
 		}
 	} else if (level == PSP_NET_INET_SOL_SOCKET) {
 		switch (optname) {
+#if !PPSSPP_PLATFORM(PS3)
 		case PSP_NET_INET_SO_DEBUG:
 			return SO_DEBUG;
 		case PSP_NET_INET_SO_ACCEPTCONN:
 			return SO_ACCEPTCONN;
+#endif
 		case PSP_NET_INET_SO_REUSEADDR:
 			return SO_REUSEADDR;
 		case PSP_NET_INET_SO_KEEPALIVE:
 			return SO_KEEPALIVE;
+#if !PPSSPP_PLATFORM(PS3)
 		case PSP_NET_INET_SO_DONTROUTE:
 			return SO_DONTROUTE;
+#endif
 		case PSP_NET_INET_SO_BROADCAST:
 			return SO_BROADCAST;
 #if defined(SO_USELOOPBACK)
@@ -567,16 +605,22 @@ int convertSockoptNamePSP2Host(int optname, int level) {
 #endif
 		}
 	}
+#if PPSSPP_PLATFORM(PS3)
+	return hleLogError(Log::sceNet, -1, "Unsupported PS3 SockOpt Name (Level = %08x)", level);
+#else
 	return hleLogError(Log::sceNet, optname, "Unknown or unsupported PSP's SockOpt Name (Level = %08x)", level);
+#endif
 }
 
 int convertSockoptNameHost2PSP(int optname, int level) {
 	if (level == IPPROTO_TCP) {
 		switch (optname) {
+#if !PPSSPP_PLATFORM(PS3)
 		case TCP_NODELAY:
 			return PSP_NET_INET_TCP_NODELAY;
 		case TCP_MAXSEG:
 			return PSP_NET_INET_TCP_MAXSEG;
+#endif
 		}
 	} else if (level == IPPROTO_IP) {
 		switch (optname) {
@@ -633,16 +677,20 @@ int convertSockoptNameHost2PSP(int optname, int level) {
 		}
 	} else if (level == SOL_SOCKET) {
 		switch (optname) {
+#if !PPSSPP_PLATFORM(PS3)
 		case SO_DEBUG:
 			return PSP_NET_INET_SO_DEBUG;
 		case SO_ACCEPTCONN:
 			return PSP_NET_INET_SO_ACCEPTCONN;
+#endif
 		case SO_REUSEADDR:
 			return PSP_NET_INET_SO_REUSEADDR;
 		case SO_KEEPALIVE:
 			return PSP_NET_INET_SO_KEEPALIVE;
+#if !PPSSPP_PLATFORM(PS3)
 		case SO_DONTROUTE:
 			return PSP_NET_INET_SO_DONTROUTE;
+#endif
 		case SO_BROADCAST:
 			return PSP_NET_INET_SO_BROADCAST;
 #if defined(SO_USELOOPBACK)
@@ -819,8 +867,10 @@ int convertInetErrnoHost2PSP(int error) {
 		return ERROR_INET_EAFNOSUPPORT;
 	case ENOTSOCK:
 		return ERROR_INET_ENOTSOCK;
+#if ESHUTDOWN != ENETDOWN
 	case ESHUTDOWN:
 		return ERROR_INET_ESHUTDOWN;
+#endif
 	case ECONNREFUSED:
 		return ERROR_INET_ECONNREFUSED;
 	case EADDRINUSE:
@@ -841,8 +891,10 @@ int convertInetErrnoHost2PSP(int error) {
 		return ERROR_INET_EALREADY;
 	case EPROTONOSUPPORT:
 		return ERROR_INET_EPROTONOSUPPORT;
+#if !PPSSPP_PLATFORM(PS3)
 	case ESOCKTNOSUPPORT:
 		return ERROR_INET_ESOCKTNOSUPPORT;
+#endif
 	case EADDRNOTAVAIL:
 		return ERROR_INET_EADDRNOTAVAIL;
 	case EISCONN:

@@ -298,7 +298,10 @@ void VertexDecoder::Step_WeightsU16Skin(const VertexDecoder *dec, const u8 *ptr,
 
 void VertexDecoder::Step_WeightsFloatSkin(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
 	const float_le *wdata = (const float_le *)(ptr);
-	dec->ComputeSkinMatrix(wdata);
+	float weights[8]{};
+	for (int j = 0; j < dec->nweights; ++j)
+		weights[j] = wdata[j];
+	dec->ComputeSkinMatrix(weights);
 }
 
 void VertexDecoder::Step_TcU8ToFloat(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
@@ -418,7 +421,7 @@ void VertexDecoder::Step_TcU16MorphToFloat(const VertexDecoder *dec, const u8 *p
 
 	for (int n = 0; n < morphcount; n++) {
 		const float w = gstate_c.morphWeights[n];
-		const u16 *uvdata = (const u16 *)(b_uvdata);
+		const u16_le *uvdata = (const u16_le *)(b_uvdata);
 		uv[0] += (float)uvdata[0] * w;
 		uv[1] += (float)uvdata[1] * w;
 		b_uvdata += onesize;
@@ -541,7 +544,7 @@ void VertexDecoder::Step_ColorInvalid(const VertexDecoder *dec, const u8 *ptr, u
 
 void VertexDecoder::Step_Color565(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
 	u16 cdata = *(const u16_le *)(ptr + dec->coloff);
-	u32 *c = (u32 *)(decoded + dec->decFmt.c0off);
+	u32_le *c = (u32_le *)(decoded + dec->decFmt.c0off);
 	*c = RGB565ToRGBA8888(cdata);
 }
 
@@ -551,7 +554,7 @@ void VertexDecoder::Step_Color5551(const VertexDecoder *dec, const u8 *ptr, u8 *
 	if (!alpha) {
 		gstate_c.vertexFullAlpha = false;
 	}
-	u32 *c = (u32 *)(decoded + dec->decFmt.c0off);
+	u32_le *c = (u32_le *)(decoded + dec->decFmt.c0off);
 	*c = RGBA5551ToRGBA8888(cdata);
 }
 
@@ -560,7 +563,7 @@ void VertexDecoder::Step_Color4444(const VertexDecoder *dec, const u8 *ptr, u8 *
 	if ((cdata >> 12) != 0xF) {
 		gstate_c.vertexFullAlpha = false;
 	}
-	u32 *c = (u32 *)(decoded + dec->decFmt.c0off);
+	u32_le *c = (u32_le *)(decoded + dec->decFmt.c0off);
 	*c = RGBA4444ToRGBA8888(cdata);
 }
 
@@ -708,7 +711,8 @@ void VertexDecoder::Step_NormalS16Skin(const VertexDecoder *dec, const u8 *ptr, 
 
 void VertexDecoder::Step_NormalFloatSkin(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
 	float *normal = (float *)(decoded + dec->decFmt.nrmoff);
-	const float_le *fn = (const float_le *)(ptr + dec->nrmoff);
+	const float_le *source = (const float_le *)(ptr + dec->nrmoff);
+	const float fn[3] = { source[0], source[1], source[2] };
 	Norm3ByMatrix43(normal, fn, skinMatrix);
 }
 
@@ -841,7 +845,9 @@ void VertexDecoder::Step_PosS16(const VertexDecoder *dec, const u8 *ptr, u8 *dec
 }
 
 void VertexDecoder::Step_PosFloat(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
-	Vec4F32 v = Vec4F32::Load((const float *)(ptr + dec->posoff));
+	const float_le *source = (const float_le *)(ptr + dec->posoff);
+	const float native[4] = { source[0], source[1], source[2], 0.0f };
+	Vec4F32 v = Vec4F32::Load(native);
 	// NaN and infinity only have to come out finite, so that the viewport scale can zero them later
 	// like the PSP does (0 * NaN == 0 there). The platforms differ in how (SSE clamps, NEON zeroes),
 	// and so do the JITs, which is fine.
@@ -865,7 +871,8 @@ void VertexDecoder::Step_PosS16Skin(const VertexDecoder *dec, const u8 *ptr, u8 
 void VertexDecoder::Step_PosFloatSkin(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
 	// TODO: Clean for NaN/INF here.
 	float *pos = (float *)(decoded + dec->decFmt.posoff);
-	const float_le *fn = (const float_le *)(ptr + dec->posoff);
+	const float_le *source = (const float_le *)(ptr + dec->posoff);
+	const float fn[3] = { source[0], source[1], source[2] };
 	Vec3ByMatrix43(pos, fn, skinMatrix);
 }
 
@@ -896,8 +903,9 @@ void VertexDecoder::Step_PosS16Through(const VertexDecoder *dec, const u8 *ptr, 
 
 void VertexDecoder::Step_PosFloatThrough(const VertexDecoder *dec, const u8 *ptr, u8 *decoded) {
 	float *v = (float *)(decoded + dec->decFmt.posoff);
-	const float *fv = (const float *)(ptr + dec->posoff);
-	memcpy(v, fv, 8);
+	const float_le *fv = (const float_le *)(ptr + dec->posoff);
+	v[0] = fv[0];
+	v[1] = fv[1];
 	// Depth is an integer in through mode: truncate, and clamp to 16 bits (NaN becomes 0).
 	const float z = fv[2];
 	v[2] = z >= 65535.0f ? 65535.0f : (z > 0.0f ? (float)(int)z : 0.0f);
@@ -1391,10 +1399,12 @@ void VertexDecoder::SetVertexType(u32 fmt, const VertexDecoderOptions &options, 
 	if (jitCache) {
 		// Compile doesn't check for space. We can't clear the cache here since other decoders point into it,
 		// so when it's full (only seen with garbage display lists), new decoders use the interpreter.
+		#ifdef VERTEXDECODER_JIT_BACKEND
 		if (jitCache->GetSpaceLeft() < 4096) {
 			WARN_LOG(Log::G3D, "Vertex decoder JIT cache full, using the interpreter for %08x", fmt_);
 			return;
 		}
+		#endif
 		jitted_ = jitCache->Compile(*this, &jittedSize_);
 		if (!jitted_) {
 			WARN_LOG(Log::G3D, "Vertex decoder JIT failed! fmt = %08x (%s)", fmt_, GetString(SHADER_STRING_SHORT_DESC).c_str());

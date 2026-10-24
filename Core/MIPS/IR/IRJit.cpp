@@ -50,6 +50,110 @@
 
 namespace MIPSComp {
 
+// Diagnostics (PS3 "nanwatch=1", IR interpreter only): after each block, float or VFPU registers
+// that hold a NaN now but didn't before are reported once per block - which game code first makes
+// a NaN (Dead to Rights' disarm camera). Off: one predictable branch per block.
+// Diagnostics (PS3 "storewatch=1", IR interpreter only): the last 16-bit and unaligned stores, with
+// the block that made them, so that the GE side can name the code that wrote vertex data it finds
+// half-written (Call of Duty's rainbow walls: 16-bit colours in 8888 slots).
+bool g_irStoreWatch = false;
+u32 g_irStoreWatchBlock = 0;
+StoreWatchRec *g_irStoreRing = nullptr;
+u32 g_irStoreRingPos = 0;
+
+void IRStoreWatchEnable(bool on) {
+	if (on && !g_irStoreRing) {
+		g_irStoreRing = new (std::nothrow) StoreWatchRec[STORE_WATCH_RING];
+		if (g_irStoreRing)
+			memset(g_irStoreRing, 0, sizeof(StoreWatchRec) * STORE_WATCH_RING);
+	}
+	g_irStoreWatch = on && g_irStoreRing != nullptr;
+}
+
+void IRStoreWatchNote(u32 addr, u32 value, u8 kind) {
+	StoreWatchRec &r = g_irStoreRing[g_irStoreRingPos++ & (STORE_WATCH_RING - 1)];
+	r.block = g_irStoreWatchBlock;
+	r.addr = addr & 0x3FFFFFFF;
+	r.value = value;
+	r.kind = kind;
+}
+
+bool g_irNaNWatch = false;
+// Also the 128 VFPU registers (nanwatch=2); otherwise only the 32 FPU ones, which is much cheaper.
+bool g_irNaNWatchVfpu = false;
+// Infinities count too (nanwatch=4+): 0 * inf is where Dead to Rights' NaN came from.
+bool g_irNaNWatchInf = false;
+void (*g_irNaNWatchLog)(u32 blockStart, u32 blockBytes, int reg, u32 before, u32 after, const u32 *fpuBefore) = nullptr;
+
+#if !PPSSPP_PLATFORM(PS3)
+// Host test hook: PPSSPP_NANWATCH=1 turns it on with output to stderr.
+static void HostNaNWatchLog(u32 blockStart, u32 blockBytes, int reg, u32 before, u32 after, const u32 *) {
+	fprintf(stderr, "NANWATCH block %08x (%u) reg %d %08x -> %08x\n", blockStart, blockBytes / 4, reg, before, after);
+}
+static struct HostNaNWatchInit {
+	HostNaNWatchInit() {
+		if (getenv("PPSSPP_NANWATCH")) {
+			g_irNaNWatch = true;
+			g_irNaNWatchLog = &HostNaNWatchLog;
+		}
+	}
+} s_hostNaNWatchInit;
+#endif
+
+// 7f800001 isn't counted: the PSP's own NaN, which the registers hold from boot and games save and
+// restore all the time (Dead to Rights' log was full of those) - not a NaN being made.
+static inline bool IsNaNBits(u32 v) { return (v & 0x7FFFFFFFu) > 0x7F800000u && v != 0x7F800001u; }
+static inline bool IsBadBits(u32 v) {
+	return IsNaNBits(v) || (g_irNaNWatchInf && (v & 0x7FFFFFFFu) == 0x7F800000u);
+}
+static inline bool WasBadBits(u32 v) { return g_irNaNWatchInf ? (v & 0x7FFFFFFFu) >= 0x7F800000u : (v & 0x7FFFFFFFu) > 0x7F800000u; }
+
+struct NaNSnapshot {
+	u32 bits[32 + 128];
+};
+
+static inline void TakeNaNSnapshot(const MIPSState *mips, NaNSnapshot *snap) {
+	memcpy(snap->bits, mips->fi, 32 * 4);
+	if (g_irNaNWatchVfpu)
+		memcpy(snap->bits + 32, mips->vi, 128 * 4);
+}
+
+static void CheckNaNSnapshot(const MIPSState *mips, const NaNSnapshot &before, JitBlockTable &blocks, u32 offset) {
+	static std::set<u32> reported;
+	if (reported.size() >= 400 || !g_irNaNWatchLog)
+		return;
+	// Quick pass: nothing in the FPU registers looks like a new NaN (the usual case).
+	bool any = false;
+	for (int i = 0; i < 32 && !any; ++i)
+		any = IsBadBits(mips->fi[i]) && mips->fi[i] != before.bits[i];
+	if (!any && g_irNaNWatchVfpu && memcmp(mips->vi, before.bits + 32, 128 * 4) != 0) {
+		for (int i = 0; i < 128 && !any; ++i)
+			any = IsBadBits(mips->vi[i]) && mips->vi[i] != before.bits[32 + i];
+	}
+	if (!any)
+		return;
+	const int regs = g_irNaNWatchVfpu ? 32 + 128 : 32;
+	for (int i = 0; i < regs; ++i) {
+		const u32 now = i < 32 ? mips->fi[i] : mips->vi[i - 32];
+		if (IsBadBits(now) && !WasBadBits(before.bits[i])) {
+			const JitBlock *block = blocks.GetBlock(blocks.FindByEntry(offset));
+			if (!block)
+				return;
+			u32 blockStart, blockBytes;
+			block->GetRange(&blockStart, &blockBytes);
+			if (!reported.insert(blockStart).second)
+				return;
+			g_irNaNWatchLog(blockStart, blockBytes, i, before.bits[i], now, before.bits);
+			return;
+		}
+	}
+}
+
+
+int g_irPs3BlockLimit = 65536;
+u32 g_irPs3ArenaLimit = 1536 * 1024;
+void (*g_irPs3CacheFullHook)(int blocks) = nullptr;
+
 IRJit::IRJit(MIPSState *mipsState, bool compileToNative) : frontend_(mipsState->HasDefaultPrefix()), mips_(mipsState) {
 	// u32 size = 128 * 1024;
 	InitIR();
@@ -121,7 +225,9 @@ void IRJit::ClearCache() {
 void IRInterpreterJit::ClearCache() {
 	IRJit::ClearCache();
 	arena_.clear();
+#if !PPSSPP_PLATFORM(PS3)
 	arena_.shrink_to_fit();
+#endif
 }
 
 void IRJit::FlushProfile() {
@@ -260,7 +366,7 @@ void IRJit::Compile(u32 em_address) {
 IRJit::CompileResult IRJit::CompileBlock(u32 em_address, std::vector<IRInst> &instructions, u32 &mipsBytes) {
 	_dbg_assert_(compilerEnabled_);
 
-	frontend_.DoJit(em_address, instructions, mipsBytes);
+	frontend_.DoJit(em_address, instructions, mipsBytes, !UnoptimizedFirst());
 	_dbg_assert_(!instructions.empty());
 
 	if (mipsTracer.tracing_enabled && instructions.size() > 1 && instructions[1].op == IROp::LogIRBlock) {
@@ -268,6 +374,14 @@ IRJit::CompileResult IRJit::CompileBlock(u32 em_address, std::vector<IRInst> &in
 		instructions[1].constant = mipsTracer.prepare_block(em_address, mipsBytes);
 	}
 
+#if PPSSPP_PLATFORM(PS3)
+	if (blocks_.GetNumBlocks() >= g_irPs3BlockLimit) {
+		if (g_irPs3CacheFullHook) {
+			g_irPs3CacheFullHook(blocks_.GetNumBlocks());
+		}
+		return CompileResult::ARENA_FULL;
+	}
+#endif
 	int block_num = blocks_.AllocateBlock(em_address, mipsBytes, (u32)instructions.size());
 	JitBlock *b = blocks_.GetBlock(block_num);
 	if (mipsTracer.tracing_enabled) {
@@ -294,10 +408,22 @@ IRJit::CompileResult IRInterpreterJit::CompileTargetBlock(int block_num, const s
 		arena_.push_back(IRInst{ IROp::Bad });
 	}
 	const int offset = (int)arena_.size();
-	if (offset >= MAX_ARENA_SIZE) {
+#if PPSSPP_PLATFORM(PS3)
+	if (offset + instructions.size() >= g_irPs3ArenaLimit) {
+#else
+	if (offset + instructions.size() >= MAX_ARENA_SIZE) {
+#endif
 		WARN_LOG(Log::JIT, "Filled IR arena, restarting");
 		return CompileResult::ARENA_FULL;
 	}
+#if PPSSPP_PLATFORM(PS3)
+	const size_t required = offset + instructions.size();
+	if (required > arena_.capacity()) {
+		// Grow on demand instead of reserving the full 12 MB cache at the first block.
+		const size_t growth = std::max<size_t>(64 * 1024, arena_.capacity() * 2);
+		arena_.reserve(std::min<size_t>(g_irPs3ArenaLimit, std::max(required, growth)));
+	}
+#endif
 	arena_.insert(arena_.end(), instructions.begin(), instructions.end());
 	blocks_.GetBlock(block_num)->SetEntry(offset);
 	return CompileResult::OK;
@@ -364,8 +490,18 @@ inline void IRInterpreterJit::RunBlocksUntilDowncount() {
 				block->profileStats_.executions += 1;
 				block->profileStats_.totalNanos += start.ElapsedNanos();
 			} else {
-				// Runs on through the blocks it can, as long as downcount lasts.
-				mips->pc = IRInterpret(mips, instPtr, arena_.data());
+				if (g_irStoreWatch) {
+					const JitBlock *block = blocks_.GetBlock(blocks_.FindByEntry(offset));
+					g_irStoreWatchBlock = block ? block->GetOriginalStart() : 0;
+				}
+				if (g_irNaNWatch) {
+					NaNSnapshot snap;
+					TakeNaNSnapshot(mips, &snap);
+					mips->pc = IRInterpret(mips, instPtr);
+					CheckNaNSnapshot(mips, snap, blocks_, offset);
+				} else {
+					mips->pc = IRInterpret(mips, instPtr, arena_.data());
+				}
 			}
 			// Note: this will "jump to zero" on a badly constructed block missing exits.
 			if (!mips->space->IsValid4AlignedAddress(mips->pc)) {

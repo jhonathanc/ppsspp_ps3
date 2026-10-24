@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cstdint>
+#include "Common/Swap.h"
 
 #include "GPU/GPUCommon.h"
 #include "GPU/Common/DepthSwizzle.h"
@@ -27,8 +28,8 @@ struct FormatBuffer {
 	FormatBuffer() { data = nullptr; }
 	union {
 		u8 *data;
-		u16 *as16;
-		u32 *as32;
+		u16_le *as16;
+		u32_le *as32;
 	};
 
 	inline void Set16(int x, int y, int stride, u16 v) const {
@@ -47,11 +48,11 @@ struct FormatBuffer {
 		return as32[x + y * stride];
 	}
 
-	inline u16 *Get16Ptr(int x, int y, int stride) const {
+	inline u16_le *Get16Ptr(int x, int y, int stride) const {
 		return &as16[x + y * stride];
 	}
 
-	inline u32 *Get32Ptr(int x, int y, int stride) const {
+	inline u32_le *Get32Ptr(int x, int y, int stride) const {
 		return &as32[x + y * stride];
 	}
 };
@@ -65,8 +66,8 @@ struct DepthBuffer {
 	// sceGeEdramSetAddrTranslation's value, which with the color format picks the layout.
 	uint32_t translation = 0x400;
 
-	inline u16 *Get16Ptr(int x, int y, int stride) const {
-		return (u16 *)(vram + layout.Stored(base + (uint32_t)(x + y * stride) * 2));
+	inline u16_le *Get16Ptr(int x, int y, int stride) const {
+		return (u16_le *)(vram + layout.Stored(base + (uint32_t)(x + y * stride) * 2));
 	}
 	inline u16 Get16(int x, int y, int stride) const {
 		return *Get16Ptr(x, y, stride);
@@ -117,6 +118,10 @@ enum class SoftDirty : uint32_t {
 
 	BINNER_RANGE = 1ULL << 22,
 	BINNER_OVERLAP = 1ULL << 23,
+
+	// Only the LOD mode/bias changed (Gran Turismo, every draw): the rasterizer state is patched
+	// instead of computed again.
+	RAST_TEXLEVEL = 1ULL << 24,
 };
 static inline SoftDirty operator |(const SoftDirty &lhs, const SoftDirty &rhs) {
 	return SoftDirty((uint64_t)lhs | (uint64_t)rhs);
@@ -143,6 +148,8 @@ enum class SoftGPUVRAMDirty : uint8_t {
 	CLEAR = 0,
 	DIRTY = 1,
 	REALLY_DIRTY = 2,
+	// Drawn since the frontend last showed it (PS3 frame counting). Kept with frameskip off too.
+	NEW_PICTURE = 4,
 };
 
 ENUM_CLASS_BITOPS(SoftGPUVRAMDirty);
@@ -207,6 +214,9 @@ public:
 
 	bool FramebufferDirty() override;
 	bool FramebufferReallyDirty() override;
+	// Whether the display buffer was drawn since the last call (a new picture, not the same one
+	// shown again). For the PS3 frontend's frame rate.
+	bool TakeNewPicture();
 
 	bool GetCurrentFramebuffer(GPUDebugBuffer &buffer, GPUDebugFramebufferType type, int maxRes = -1) override;
 	bool GetOutputFramebuffer(GPUDebugBuffer &buffer) override;
@@ -280,6 +290,19 @@ private:
 	SoftGPUVRAMDirty lastDirtyValue_ = SoftGPUVRAMDirty::CLEAR;
 
 	u32 displayFramebuf_;
+	// Framebuffers drawn to, with the display change count when last (and before that) drawn to:
+	// a skipped frame (frameskip) skips only the draws into ones drawn in an earlier frame too.
+	struct TargetSeen { u32 off; u32 frame; u32 prevFrame; };
+	TargetSeen targetsSeen_[16]{};
+	u32 displayChanges_ = 1;  // Game frame number (GPU stats flips).
+	u32 lastTargetOff_ = 0xFFFFFFFF, lastTargetFrame_ = 0;
+	bool lastTargetCovered_ = true;
+	bool FrameSkipCoversTarget();
+	friend struct FrameSkipScope;
+	// The last block transfer from memory into VRAM, and the game frame it was in (see
+	// Execute_BlockTransferStart: one repeated every frame is left out of skipped frames).
+	u32 lastXferSrc_ = 0, lastXferDst_ = 0, lastXferSize_ = 0, lastXferFrame_ = 0;
+	u32 skippedXfers_ = 0;
 	u32 displayStride_;
 	GEBufferFormat displayFormat_;
 	DSStretch presentedDSNative_ = DSStretch::Off;

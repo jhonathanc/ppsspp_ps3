@@ -16,7 +16,9 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
+#include "Common/FrontendTrace.h"
 #include <ctime>
+#include <system_error>
 #include <thread>
 
 #include "Common/Data/Encoding/Utf8.h"
@@ -40,6 +42,37 @@
 #include "Core/Config.h"
 #include "Core/Reporting.h"
 #include "Core/SaveState.h"
+
+#include <atomic>
+#include <cstdarg>
+
+// Save dialog diagnostics in the log (build 188: Call of Duty froze deleting a save and said the
+// memory stick was full). SAVELOG goes to launch.log on the PS3.
+static void SaveLog(const char *fmt, ...) {
+#if PPSSPP_PLATFORM(PS3)
+	if (!FrontendLogOn(FrontendLog::SAVEDATA))
+		return;
+#endif
+	char buf[512];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(buf, sizeof(buf), fmt, args);
+	va_end(args);
+#if PPSSPP_PLATFORM(PS3)
+	FrontendTrace("Savedata: %s", buf);
+#else
+	INFO_LOG(Log::sceUtility, "Savedata: %s", buf);
+#endif
+}
+
+// What the save IO thread is doing, for the stall report (empty: nothing).
+char g_saveIOActivity[256];
+std::atomic<double> g_saveIOStart{0.0};
+// Where the emulation thread is in the save dialog (stall report): step and screen.
+std::atomic<int> g_saveDialogStep{0};
+std::atomic<int> g_saveDialogDisplay{-1};
+// The step of the savedata work the IO thread is in (SavedataParam), for the stall report.
+std::atomic<const char *> g_saveIOStage{""};
 
 static double g_lastSaveTime = -1.0;
 
@@ -160,6 +193,8 @@ int PSPSaveDialog::Init(int paramAddr) {
 	const char *modeName = mode < ARRAY_SIZE(utilitySavedataTypeNames) ? utilitySavedataTypeNames[mode] : "UNKNOWN";
 	INFO_LOG(Log::sceUtility,"sceUtilitySavedataInitStart(%08x) - %s (%d)", paramAddr, modeName, mode);
 	INFO_LOG(Log::sceUtility,"sceUtilitySavedataInitStart(%08x) : Game key (hex): %s", paramAddr, param.GetKey(param.GetPspParam()).c_str());
+	SaveLog("start %s (mode %d), game '%.13s', save '%.20s', file '%.13s', data %u bytes (buffer %u), focus %d, multi-save list %08x",
+		modeName, mode, request.gameName, request.saveName, request.fileName, (u32)request.dataSize, (u32)request.dataBufSize, (int)(u32)request.focus, request.saveNameList.ptr);
 
 	yesnoChoice = 1;
 	switch ((SceUtilitySavedataFocus)(u32)param.GetPspParam()->focus) {
@@ -191,7 +226,7 @@ int PSPSaveDialog::Init(int paramAddr) {
 		currentSelectedSave = param.GetLastEmptySave();
 		break;
 	default:
-		WARN_LOG(Log::sceUtility, "Unknown save list focus option: %d", param.GetPspParam()->focus);
+		WARN_LOG(Log::sceUtility, "Unknown save list focus option: %d", (int)param.GetPspParam()->focus);
 		currentSelectedSave = 0;
 		break;
 	}
@@ -406,7 +441,9 @@ void PSPSaveDialog::DisplayBanner(int which)
 }
 
 void PSPSaveDialog::DisplaySaveList(bool canMove) {
+	g_saveDialogStep = 10;
 	std::lock_guard<std::mutex> guard(paramLock);
+	g_saveDialogStep = 11;
 	static int upFramesHeld = 0;
 	static int downFramesHeld = 0;
 
@@ -547,7 +584,9 @@ static void FormatSaveDate(char *date, size_t sz, const tm &t) {
 }
 
 void PSPSaveDialog::DisplaySaveDataInfo1() {
+	g_saveDialogStep = 12;
 	std::lock_guard<std::mutex> guard(paramLock);
+	g_saveDialogStep = 13;
 	const SaveFileInfo &saveInfo = param.GetFileInfo(currentSelectedSave);
 	PPGeStyle saveTitleStyle = FadedStyle(PPGeAlign::BOX_LEFT, 0.55f);
 
@@ -666,6 +705,12 @@ void PSPSaveDialog::DisplayMessage(std::string_view text, bool hasYesNo)
 int PSPSaveDialog::Update(int animSpeed) {
 	if (GetStatus() != SCE_UTILITY_STATUS_RUNNING)
 		return SCE_ERROR_UTILITY_INVALID_STATUS;
+	g_saveDialogStep = 1;
+	if (g_saveDialogDisplay != (int)display) {
+		SaveLog("dialog screen %d -> %d", g_saveDialogDisplay.load(), (int)display);
+		g_saveDialogDisplay = (int)display;
+	}
+	struct StepDone { ~StepDone() { g_saveDialogStep = 0; } } stepDone;
 
 	if (!param.GetPspParam()) {
 		ChangeStatusShutdown(SAVEDATA_SHUTDOWN_DELAY_US);
@@ -686,10 +731,12 @@ int PSPSaveDialog::Update(int animSpeed) {
 		memset(&request, 0, sizeof(request));
 		Memory::Memcpy(&request, requestAddr, size);
 		Memory::Memcpy(&originalRequest, requestAddr, size);
+		g_saveDialogStep = 2;
 		std::lock_guard<std::mutex> guard(paramLock);
 		param.SetPspParam(&request);
 	}
 
+	g_saveDialogStep = 3;
 	param.ClearSFOCache();
 	UpdateButtons();
 	UpdateFade(animSpeed);
@@ -698,6 +745,7 @@ int PSPSaveDialog::Update(int animSpeed) {
 
 	auto di = GetI18NCategory(I18NCat::DIALOG);
 
+	g_saveDialogStep = 4;
 	switch (display)
 	{
 		case DS_SAVE_LIST_CHOICE:
@@ -1111,6 +1159,8 @@ void PSPSaveDialog::ExecuteIOAction() {
 	}
 
 	ioParam_.ClearSFOCache();
+	SaveLog("IO done in %.0f ms: result %08x, shows %d", (time_now_d() - g_saveIOStart) * 1000.0, (u32)result, (int)ioDisplay_);
+	g_saveIOActivity[0] = 0;
 	ioThreadStatus = SAVEIO_READY;
 }
 
@@ -1167,6 +1217,11 @@ void PSPSaveDialog::ExecuteNotVisibleIOAction() {
 		break;
 	case SCE_UTILITY_SAVEDATA_TYPE_SIZES:
 		result = ioParam_.GetSizes(&ioRequest_);
+		SaveLog("sizes: free %u KB (%u clusters of %u), this save's data %u KB, a new save needs %u KB",
+			ioRequest_.msFree.IsValid() ? (u32)ioRequest_.msFree->freeSpaceKB : 0, ioRequest_.msFree.IsValid() ? (u32)ioRequest_.msFree->freeClusters : 0,
+			ioRequest_.msFree.IsValid() ? (u32)ioRequest_.msFree->clusterSize : 0,
+			ioRequest_.msData.IsValid() ? (u32)ioRequest_.msData->info.usedSpaceKB : 0,
+			ioRequest_.utilityData.IsValid() ? (u32)ioRequest_.utilityData->usedSpaceKB : 0);
 		break;
 	case SCE_UTILITY_SAVEDATA_TYPE_LIST:
 		ioParam_.GetList(&ioRequest_);
@@ -1258,13 +1313,26 @@ void PSPSaveDialog::StartIOThread() {
 		ioDeleteDir_ = param.GetSaveDir(param.GetSelectedSave());
 	}
 
+	snprintf(g_saveIOActivity, sizeof(g_saveIOActivity), "display %d, mode %d, dir '%s'%s%s", (int)display, (int)mode,
+		ioSaveDirName_.c_str(), ioDeleteDir_.empty() ? "" : ", deleting ", ioDeleteDir_.c_str());
+	g_saveIOStart = time_now_d();
+	g_saveIOStage = "starting";
+	SaveLog("IO started: %s", g_saveIOActivity);
 	ioThreadStatus = SAVEIO_PENDING;
-	ioThread = std::thread([this]() {
-		SetCurrentThreadName("SaveIO");
+	try {
+		ioThread = std::thread([this]() {
+			SetCurrentThreadName("SaveIO");
 
-		AndroidJNIThreadContext jniContext;
-		this->ExecuteIOAction();
-	});
+			AndroidJNIThreadContext jniContext;
+			this->ExecuteIOAction();
+		});
+	} catch (const std::system_error &e) {
+		// No thread to be had (the PS3 with Silent Hill Origins: too little memory left for a
+		// thread stack). The uncaught exception closed the emulator; do the IO here instead -
+		// the game waits a moment, but the save goes through.
+		WARN_LOG(Log::sceUtility, "Save IO thread couldn't start (%s): saving on this thread", e.what());
+		ExecuteIOAction();
+	}
 }
 
 // Takes the IO thread's results back. Without wait, only if it's done: returns whether it was.
@@ -1272,9 +1340,12 @@ bool PSPSaveDialog::FinishIO(bool wait) {
 	if (ioThreadStatus == SAVEIO_PENDING && !wait) {
 		return false;
 	}
+	const int stepBefore = g_saveDialogStep;
+	g_saveDialogStep = 20;
 	if (ioThread.joinable()) {
 		ioThread.join();
 	}
+	g_saveDialogStep = 21;
 	if (ioThreadStatus != SAVEIO_READY) {
 		return true;
 	}
@@ -1339,12 +1410,16 @@ bool PSPSaveDialog::FinishIO(bool wait) {
 		display = ioDisplay_;
 		// Show what was saved or deleted in the list.
 		if (display == DS_SAVE_DONE || display == DS_DELETE_DONE) {
+			g_saveDialogStep = 22;
 			std::lock_guard<std::mutex> guard(paramLock);
+			g_saveDialogStep = 23;
 			param.SetPspParam(param.GetPspParam());
+			SaveLog("list reloaded: %d entries", param.GetFilenameCount());
 		}
 	}
 
 	ioThreadStatus = SAVEIO_DONE;
+	g_saveDialogStep = stepBefore;
 	return true;
 }
 

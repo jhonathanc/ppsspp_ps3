@@ -104,6 +104,8 @@ inline double bswapd(double f) {
 	return dat2.f;
 }
 
+// Serialized PSP fields may be unaligned, including inside packed records.
+#pragma pack(push, 1)
 template <typename T, typename F>
 struct swap_struct_t {
 	typedef swap_struct_t<T, F> swapped_t;
@@ -118,7 +120,8 @@ public:
 	T const swap() const {
 		return swap(value);
 	}
-	swap_struct_t() : value((T)0) {}
+	// Match native scalar initialization and keep containing PSP structs POD.
+	swap_struct_t() = default;
 	swap_struct_t(const T &v): value(swap(v)) {}
 
 	template <typename S>
@@ -127,18 +130,9 @@ public:
 		return *this;
 	}
 
-	operator unsigned long() const { return (unsigned long)swap(); }
-	operator long() const { return (long)swap(); }	
-	operator s8() const { return (s8)swap(); }
-	operator u8() const { return (u8)swap(); }
-	operator s16() const { return (s16)swap(); }
-	operator u16() const { return (u16)swap(); }
-	operator s32() const { return (s32)swap(); }
-	operator u32() const { return (u32)swap(); }
-	operator s64() const { return (s64)swap(); }
-	operator u64() const { return (u64)swap(); }
-	operator float() const { return (float)swap(); }
-	operator double() const { return (double)swap(); }
+	// Convert through the stored type. Multiple numeric conversion operators make
+	// built-in operations such as modulo ambiguous on big-endian hosts.
+	operator T() const { return swap(); }
 
 	// +v
 	swapped_t operator +() const {
@@ -150,38 +144,38 @@ public:
 	}
 
 	// v / 5
-	swapped_t operator/(const swapped_t &i) const {
+	auto operator/(const swapped_t &i) const {
 		return swap() / i.swap();
 	}
 	template <typename S>
-	swapped_t operator/(const S &i) const {
+	auto operator/(const S &i) const {
 		return swap() / i;
 	}
 
 	// v * 5
-	swapped_t operator*(const swapped_t &i) const {
+	auto operator*(const swapped_t &i) const {
 		return swap() * i.swap();
 	}
 	template <typename S>
-	swapped_t operator*(const S &i) const {
+	auto operator*(const S &i) const {
 		return swap() * i;
 	}
 
 	// v + 5
-	swapped_t operator+(const swapped_t &i) const {
+	auto operator+(const swapped_t &i) const {
 		return swap() + i.swap();
 	}
 	template <typename S>
-	swapped_t operator+(const S &i) const {
-		return swap() + (T)i;
+	auto operator+(const S &i) const {
+		return swap() + i;
 	}
 	// v - 5
-	swapped_t operator-(const swapped_t &i) const {
+	auto operator-(const swapped_t &i) const {
 		return swap() - i.swap();
 	}
 	template <typename S>
-	swapped_t operator-(const S &i) const {
-		return swap() - (T)i;
+	auto operator-(const S &i) const {
+		return swap() - i;
 	}
 
 	// v += 5
@@ -284,7 +278,7 @@ public:
 	}
 
 	// logical
-	swapped_t operator !() const {
+	bool operator !() const {
 		return !swap();
 	}
 	
@@ -297,15 +291,15 @@ public:
 	}
 
 	// bitmath
-	swapped_t operator ~() const {
+	auto operator ~() const {
 		return ~swap();
 	}
 
-	swapped_t operator &(const swapped_t &b) const {
+	auto operator &(const swapped_t &b) const {
 		return swap() & b.swap();
 	}
 	template <typename S>
-	swapped_t operator &(const S &b) const {
+	auto operator &(const S &b) const {
 		return swap() & b;
 	}
 	swapped_t& operator &=(const swapped_t &b) {
@@ -318,11 +312,11 @@ public:
 		return *this;
 	}
 
-	swapped_t operator |(const swapped_t &b) const {
+	auto operator |(const swapped_t &b) const {
 		return swap() | b.swap();
 	}
 	template <typename S>
-	swapped_t operator |(const S &b) const {
+	auto operator |(const S &b) const {
 		return swap() | b;
 	}
 	swapped_t& operator |=(const swapped_t &b) {
@@ -335,11 +329,11 @@ public:
 		return *this;
 	}
 
-	swapped_t operator ^(const swapped_t &b) const {
+	auto operator ^(const swapped_t &b) const {
 		return swap() ^ b.swap();
 	}
 	template <typename S>
-	swapped_t operator ^(const S &b) const {
+	auto operator ^(const S &b) const {
 		return swap() ^ b;
 	}
 	swapped_t& operator ^=(const swapped_t &b) {
@@ -353,7 +347,7 @@ public:
 	}
 
 	template <typename S>
-	swapped_t operator <<(const S &b) const {
+	auto operator <<(const S &b) const {
 		return swap() << b;
 	}
 	template <typename S>
@@ -363,7 +357,7 @@ public:
 	}
 
 	template <typename S>
-	swapped_t operator >>(const S &b) const {
+	auto operator >>(const S &b) const {
 		return swap() >> b;
 	}
 	template <typename S>
@@ -423,6 +417,7 @@ public:
 	friend bool operator==(const S &p, const swapped_t& v);
 };
 
+#pragma pack(pop)
 
 // Arithmetics
 template <typename S, typename T, typename F>
@@ -469,10 +464,6 @@ S operator&(const S &i, const swap_struct_t<T, F>& v) {
 	return i & v.swap();
 }
 
-template <typename S, typename T, typename F>
-S operator&(const swap_struct_t<T, F>& v, const S &i) {
-	return (S)(v.swap() & i);
-}
 
 
 // Comparaison

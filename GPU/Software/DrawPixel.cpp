@@ -72,12 +72,14 @@ static inline void SetPixelDepth(int x, int y, int stride, u16 value) {
 	depthbuf.Set16(x, y, stride, value);
 }
 
-// NOTE: These likely aren't endian safe
 // The depths of a span's four pixels from x.
 // Loaded as a vector where they're stored together (all but across a 16-pixel run).
 static inline Vec4S32 ReadSpanDepth(int x, int y, int stride) {
-	if (depthbuf.Contiguous4(x, y, stride))
+#if !COMMON_BIG_ENDIAN
+	if (depthbuf.Contiguous4(x, y, stride)) {
 		return Vec4S32::LoadU16(depthbuf.Get16Ptr(x, y, stride));
+	}
+#endif
 	alignas(16) int out[4];
 	for (int i = 0; i < 4; ++i)
 		out[i] = depthbuf.Get16(x + i, y, stride);
@@ -957,9 +959,16 @@ static inline void DrawSpanVector(int x, int y, const int *maskIn, const int *zI
 	const int depthStride = pixelID.cached.depthbufStride;
 	alignas(16) int old[4];
 	if (fbFormat == GE_FORMAT_8888) {
+#if COMMON_BIG_ENDIAN
+		const u32_le *p = fb.Get32Ptr(x, y, fbStride);
+		for (int i = 0; i < 4; ++i) {
+			old[i] = p[i];
+		}
+#else
 		memcpy(old, fb.Get32Ptr(x, y, fbStride), sizeof(old));
+#endif
 	} else {
-		const u16 *p = fb.Get16Ptr(x, y, fbStride);
+		const u16_le *p = fb.Get16Ptr(x, y, fbStride);
 		for (int i = 0; i < 4; ++i)
 			old[i] = p[i];
 	}
@@ -999,7 +1008,7 @@ static inline void DrawSpanVector(int x, int y, const int *maskIn, const int *zI
 
 	if (clearMode ? pixelID.DepthClear() : pixelID.depthWrite) {
 		if (depthbuf.Contiguous4(x, y, depthStride)) {
-			u16 *zp = depthbuf.Get16Ptr(x, y, depthStride);
+			u16_le *zp = depthbuf.Get16Ptr(x, y, depthStride);
 			for (int i = 0; i < 4; ++i) {
 				if (!colorDeadLanes[i])
 					zp[i] = (u16)zIn[i];
@@ -1105,17 +1114,20 @@ static inline void DrawSpanVector(int x, int y, const int *maskIn, const int *zI
 	// tile another thread draws. And a depth buffer can overlap the colors (Wipeout's bloom).
 	const bool allLive = (deadLanes[0] | deadLanes[1] | deadLanes[2] | deadLanes[3]) == 0;
 	if (fbFormat == GE_FORMAT_8888) {
-		u32 *p = fb.Get32Ptr(x, y, fbStride);
+		u32_le *p = fb.Get32Ptr(x, y, fbStride);
+#if !COMMON_BIG_ENDIAN
 		if (allLive) {
 			memcpy(p, out, sizeof(out));
-		} else {
+		} else
+#endif
+		{
 			for (int i = 0; i < 4; ++i) {
 				if (!deadLanes[i])
 					p[i] = (u32)out[i];
 			}
 		}
 	} else {
-		u16 *p = fb.Get16Ptr(x, y, fbStride);
+		u16_le *p = fb.Get16Ptr(x, y, fbStride);
 		for (int i = 0; i < 4; ++i) {
 			if (!deadLanes[i])
 				p[i] = (u16)out[i];

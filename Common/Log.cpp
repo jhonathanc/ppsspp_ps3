@@ -15,6 +15,8 @@
 // Official SVN repository and contact information can be found at
 // http://code.google.com/p/dolphin-emu/
 
+#include <cstdarg>
+#include <cstdio>
 #include <string>
 #include <mutex>
 
@@ -22,6 +24,7 @@
 
 #include "Common/CommonTypes.h"
 #include "Common/Log.h"
+#include "Common/FrontendTrace.h"
 #include "Common/StringUtils.h"
 #include "Common/Data/Encoding/Utf8.h"
 #include "Common/Thread/ThreadUtil.h"
@@ -93,6 +96,31 @@ void BreakIntoPSPDebugger(const char *reason) {
 	}
 }
 
+void (*g_assertLogHook)(const char *text) = nullptr;
+void (*g_frontendTraceHook)(const char *text) = nullptr;
+unsigned g_frontendLogMask = ~0u;
+void (*g_frontendThreadStartedHook)(const char *name) = nullptr;
+void (*g_frontendGEStuckHook)(int queued, int type) = nullptr;
+void (*g_frontendNaNCameraHook)(int element, unsigned value) = nullptr;
+
+void FrontendTraceRaw(const char *text, unsigned length) {
+	if (g_frontendTraceHook) {
+		const std::string terminated(text, length);
+		g_frontendTraceHook(terminated.c_str());
+	}
+}
+
+void FrontendTrace(const char *format, ...) {
+	if (!g_frontendTraceHook)
+		return;
+	char text[512];
+	va_list args;
+	va_start(args, format);
+	vsnprintf(text, sizeof(text), format, args);
+	va_end(args);
+	g_frontendTraceHook(text);
+}
+
 bool HandleAssert(bool isDebugAssert, const char *function, const char *file, int line, const char *expression, const char* format, ...) {
 	// Read message and write it to the log
 	char text[LOG_BUF_SIZE];
@@ -119,6 +147,11 @@ bool HandleAssert(bool isDebugAssert, const char *function, const char *file, in
 	fprintf(stderr, "%s\n", formatted);
 
 	hitAnyAsserts = true;
+#if PPSSPP_PLATFORM(PS3)
+	// The PS3 frontend writes it to launch.log (the regular log is usually off there).
+	if (g_assertLogHook)
+		g_assertLogHook(formatted);
+#endif
 
 	// Avoid hanging on CI or on headless builds in general.
 #if PPSSPP_PLATFORM(WINDOWS) && !PPSSPP_PLATFORM(UWP)

@@ -1039,11 +1039,11 @@ u32 GPUDebugBuffer::GetRawPixel(int x, int y) const {
 
 	switch (pixelSize) {
 	case 4:
-		return *(const u32 *)ptr;
+		return *(const u32_le *)ptr;
 	case 3:
 		return ptr[0] | (ptr[1] << 8) | (ptr[2] << 16);
 	case 2:
-		return *(const u16 *)ptr;
+		return *(const u16_le *)ptr;
 	case 1:
 		return *(const u8 *)ptr;
 	default:
@@ -1066,7 +1066,7 @@ void GPUDebugBuffer::SetRawPixel(int x, int y, u32 c) {
 
 	switch (pixelSize) {
 	case 4:
-		*(u32 *)ptr = c;
+		*(u32_le *)ptr = c;
 		break;
 	case 3:
 		ptr[0] = (c >> 0) & 0xFF;
@@ -1074,7 +1074,7 @@ void GPUDebugBuffer::SetRawPixel(int x, int y, u32 c) {
 		ptr[2] = (c >> 16) & 0xFF;
 		break;
 	case 2:
-		*(u16 *)ptr = (u16)c;
+		*(u16_le *)ptr = (u16)c;
 		break;
 	case 1:
 		*ptr = (u8)c;

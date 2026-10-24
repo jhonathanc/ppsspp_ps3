@@ -1,3 +1,5 @@
+#include "ppsspp_config.h"
+#include <limits>
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include "Common/CommonWindows.h"
@@ -6,7 +8,9 @@
 #include <dirent.h>
 #include <unistd.h>
 #include <sys/stat.h>
-#if defined(__ANDROID__)
+#if PPSSPP_PLATFORM(PS3)
+#include <lv2/sysfs.h>
+#elif defined(__ANDROID__)
 #include <sys/types.h>
 #include <sys/vfs.h>
 #define statvfs statfs
@@ -41,6 +45,20 @@ bool free_disk_space(const Path &path, int64_t &space) {
 		return true;
 	}
 #else
+#if PPSSPP_PLATFORM(PS3)
+	// LV2 queries a mount point rather than an arbitrary file within it.
+	const std::string name = path.ToString();
+	if (path.Type() != PathType::NATIVE || name.size() < 2 || name[0] != '/')
+		return false;
+	const std::string mount = name.substr(0, name.find('/', 1));
+	u32 blockSize = 0;
+	u64 freeBlocks = 0;
+	if (sysFsGetFreeSize(mount.c_str(), &blockSize, &freeBlocks) != 0 || !blockSize ||
+		freeBlocks > static_cast<u64>(std::numeric_limits<int64_t>::max()) / blockSize)
+		return false;
+	space = static_cast<int64_t>(freeBlocks * blockSize);
+	return true;
+#else
 	if (path.Type() == PathType::CONTENT_URI) {
 		space = Android_GetFreeSpaceByContentUri(path.ToString());
 		INFO_LOG(Log::Common, "Free space at '%s': %" PRIu64, path.c_str(), space);
@@ -62,6 +80,7 @@ bool free_disk_space(const Path &path, int64_t &space) {
 		space = (uint64_t)diskstat.f_bavail * (uint64_t)diskstat.f_frsize;
 		return true;
 	}
+#endif
 #endif
 
 	// We can't know how much is free.

@@ -1344,7 +1344,7 @@ SceUID sceKernelCreateVpl(const char *name, int partition, u32 attr, u32 vplSize
 	vpl->header->Init(memBlockPtr, vplSize);
 
 	DEBUG_LOG(Log::sceKernel, "%x=sceKernelCreateVpl(\"%s\", block=%i, attr=%i, size=%i)", 
-		id, name, partition, vpl->nv.attr, vpl->nv.poolSize);
+		id, name, partition, (int)vpl->nv.attr, (int)vpl->nv.poolSize);
 
 	if (optPtr != 0) {
 		if (Memory::IsValid4AlignedAddress(optPtr)) {
@@ -1712,7 +1712,7 @@ struct TLSPL : public KernelObject {
 		Do(p, usage);
 		// Both index arrays.
 		if (p.mode == p.MODE_READ && (ntls.index < 0 || ntls.index >= TLSPL_NUM_INDEXES || usage.size() != (size_t)ntls.totalBlocks)) {
-			ERROR_LOG(Log::SaveState, "TLSPL: bad index %d or block count %d (%d used) in savestate", ntls.index, ntls.totalBlocks, (int)usage.size());
+			ERROR_LOG(Log::SaveState, "TLSPL: bad index %d or block count %d (%d used) in savestate", (int)ntls.index, (int)ntls.totalBlocks, (int)usage.size());
 			p.SetError(p.ERROR_FAILURE);
 		}
 	}

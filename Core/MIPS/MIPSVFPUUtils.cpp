@@ -1832,12 +1832,25 @@ static uint32_t vfpu_cos_bits(uint32_t bits) {
 	return vfpu_cos_from_reduced(angle, odd);
 }
 
+// Diagnostics (PS3 frontend, Debug on): told when one of these makes a NaN out of a number that
+// wasn't one - where a game's maths first goes wrong (Dead to Rights' camera).
+void (*g_vfpuNaNHook)(const char *op, uint32_t in) = nullptr;
+
+static inline float vfpu_nan_check(const char *op, float in, float out) {
+	if (g_vfpuNaNHook) {
+		const uint32_t o = vfpu_bits_from_float(out) & 0x7FFFFFFFu, i = vfpu_bits_from_float(in);
+		if (o > 0x7F800000u && (i & 0x7FFFFFFFu) <= 0x7F800000u)
+			g_vfpuNaNHook(op, i);
+	}
+	return out;
+}
+
 float vfpu_sin(float x) {
-	return vfpu_float_from_bits(vfpu_sin_bits(vfpu_bits_from_float(x)));
+	return vfpu_nan_check("vsin", x, vfpu_float_from_bits(vfpu_sin_bits(vfpu_bits_from_float(x))));
 }
 
 float vfpu_cos(float x) {
-	return vfpu_float_from_bits(vfpu_cos_bits(vfpu_bits_from_float(x)));
+	return vfpu_nan_check("vcos", x, vfpu_float_from_bits(vfpu_cos_bits(vfpu_bits_from_float(x))));
 }
 
 // Reduces the angle once for both.
@@ -1853,7 +1866,7 @@ void vfpu_sincos(float a, float &s, float &c) {
 		sinBits = vfpu_sin_from_reduced(angle, (bits >> 31) != odd);
 		cosBits = vfpu_cos_from_reduced(angle, odd);
 	}
-	s = vfpu_float_from_bits(sinBits);
+	s = vfpu_nan_check("vsin", a, vfpu_float_from_bits(sinBits));
 	c = vfpu_float_from_bits(cosBits);
 }
 
@@ -1902,8 +1915,9 @@ float vfpu_sqrt(float x) {
 		// Negatives and NaN give NaN, inf gives inf.
 		bits = bits == 0x7F800000u ? 0x7F800000u : 0x7F800001u;
 	}
+	const float in = x;
 	memcpy(&x, &bits, sizeof(bits));
-	return x;
+	return vfpu_nan_check("vsqrt", in, x);
 }
 
 float vfpu_rsqrt(float x) {
@@ -1919,8 +1933,9 @@ float vfpu_rsqrt(float x) {
 		// Negatives give -NaN, NaN gives NaN and inf gives 0.
 		bits = (bits >> 31) ? 0xFF800001u : (bits > 0x7F800000u ? 0x7F800001u : 0u);
 	}
+	const float in = x;
 	memcpy(&x, &bits, sizeof(bits));
-	return x;
+	return vfpu_nan_check("vrsq", in, x);
 }
 
 // asin(x) * 2/pi in fixed point with 30 fraction bits, for x in [0, 1] as 23-bit fixed point.
@@ -1947,7 +1962,7 @@ float vfpu_asin(float x) {
 		const uint32_t fixed = e < 104 ? 0 : significand >> (127 - e);
 		result = vfpu_fixed_to_bits(vfpu_asin_fixed(fixed), 30, sign != 0);
 	}
-	return vfpu_float_from_bits(result);
+	return vfpu_nan_check("vasin", x, vfpu_float_from_bits(result));
 }
 
 static uint32_t vfpu_exp2_bits(uint32_t bits) {
@@ -2027,7 +2042,7 @@ static uint32_t vfpu_log2_bits(uint32_t bits) {
 }
 
 float vfpu_log2(float x) {
-	return vfpu_float_from_bits(vfpu_log2_bits(vfpu_bits_from_float(x)));
+	return vfpu_nan_check("vlog2", x, vfpu_float_from_bits(vfpu_log2_bits(vfpu_bits_from_float(x))));
 }
 
 float vfpu_rcp(float x) {
@@ -2040,6 +2055,7 @@ float vfpu_rcp(float x) {
 		const uint32_t abs = bits & 0x7FFFFFFFu;
 		bits = (bits & 0x80000000u) ^ (abs < 0x00800000u ? 0x7F800000u : (abs > 0x7F800000u ? 0x7F800001u : 0u));
 	}
+	const float in = x;
 	memcpy(&x, &bits, sizeof(x));
-	return x;
+	return vfpu_nan_check("vrcp", in, x);
 }

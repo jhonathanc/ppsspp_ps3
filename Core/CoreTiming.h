@@ -19,6 +19,7 @@
 
 #include <string>
 #include <vector>
+#include "ppsspp_config.h"
 #include "Common/CommonTypes.h"
 #include "Common/Data/Collections/LinkedList.h"
 
@@ -75,6 +76,10 @@ inline s64 cyclesToUs(s64 cycles) {
 class MIPSState;
 
 namespace CoreTiming {
+#if PPSSPP_ARCH(POWERPC)
+// PS3 perf line: time in timed event callbacks per frame since the last call (total, top six).
+std::string PerfEventSummary(double tbPerMs, double frames);
+#endif
 	typedef void (*TimedCallback)(u64 userdata, int cyclesLate);
 
 	struct EventType {
@@ -125,6 +130,12 @@ namespace CoreTiming {
 	const Event *GetFirstEvent();
 	void RemoveEvent(int event_type);
 	bool IsScheduled(int event_type);
+	// Set while work runs off the emulation thread that has to report back to it (the GE list
+	// thread): called at the end of every Advance (false: keeps emulated time from passing what
+	// that work has got to) and before idling (true: wait for it to finish).
+	extern void (*g_asyncWorkHook)(bool mustFinish);
+	// Ends the current slice no later than this many cycles from now (as scheduling an event would).
+	void LimitSlice(s64 cyclesIntoFuture);
 	void Advance(MIPSState *mips);
 	void ForceCheck(MIPSState *mips);
 	// Runs the other CPUs (the Media Engine) up to where this one is in the slice, as they otherwise

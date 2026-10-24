@@ -26,8 +26,14 @@
 #include "GPU/GPUState.h"  // Used by TextureDecoder.h when templates get instanced
 #include "GPU/Common/TextureDecoder.h"
 #include "Core/HW/SimpleAudioDec.h"
+#include "Core/ELF/ParamSFO.h"
+#include "Common/FrontendTrace.h"
+#include "Common/TimeUtil.h"
+#include "Core/CoreTiming.h"
+#include "Core/MIPS/MIPS.h"
 
 #include <algorithm>
+#include <atomic>
 
 #ifdef USE_FFMPEG
 
@@ -279,12 +285,107 @@ bool MediaEngine::SetupStreams() {
 	return true;
 }
 
+int g_mediaVideoDecode = -1;
+
+void (*g_mediaMemoryHook)(const char *what, int bytes) = nullptr;
+
+#if PPSSPP_PLATFORM(PS3)
+// The converted picture (480x272x4 = 510 KB in one piece) is kept from one movie to the next. On the
+// PS3 main memory fragments as a game runs: Silent Hill Origins' later movies found no free piece
+// over 256 KB (build 210 log), though there was room for it at the first movie.
+static u8 *s_pictureBuffer = nullptr;
+static int s_pictureBufferSize = 0;
+#endif
+int g_mediaDeblock = 1;
+
+// Where the emulation thread is in a movie (build 210: Silent Hill Origins froze inside
+// sceMpegAvcDecode with 256 KB left in one piece, and nothing said where).
+enum MediaStep {
+	MEDIA_IDLE, MEDIA_OPEN, MEDIA_OPEN_INPUT, MEDIA_STREAMS, MEDIA_CODEC, MEDIA_PICTURE,
+	MEDIA_DECODE, MEDIA_READ, MEDIA_SEND, MEDIA_RECEIVE, MEDIA_CONVERT, MEDIA_WRITE,
+};
+static std::atomic<int> g_mediaStep{MEDIA_IDLE};
+static std::atomic<int> g_mediaReads{0};
+
+std::string MediaDecodeStepText() {
+	static const char *const names[] = {
+		"not in the decoder (in sceMpeg, or writing the picture to the GPU)", "opening a movie", "opening a movie: reading its header", "opening a movie: setting up its streams",
+		"opening a movie: opening the decoder", "allocating the picture buffer", "decoding a picture", "decoding a picture: reading data",
+		"decoding a picture: sending data to the decoder", "decoding a picture: waiting for the decoder", "decoding a picture: converting colours",
+		"writing the picture to PSP memory",
+	};
+	const int step = g_mediaStep.load();
+	char buf[160];
+	snprintf(buf, sizeof(buf), "video decoder: %s (%d data reads in this call)", step >= 0 && step < (int)(sizeof(names) / sizeof(names[0])) ? names[step] : "?", g_mediaReads.load());
+	return buf;
+}
+
+// Whether video streams get opened (g_mediaVideoDecode).
+bool MediaEngineHasFFmpeg() {
+#ifdef USE_FFMPEG
+	return true;
+#else
+	return false;
+#endif
+}
+
+static const char *const g_killzoneIDs[] = { "UCES00279", "UCUS98646", "UCJS10069", "UCKS45041", "UCAS40124" };
+
+static bool IsKillzone(const std::string &id) {
+	for (const char *k : g_killzoneIDs) {
+		if (id == k)
+			return true;
+	}
+	return false;
+}
+
+// Killzone with videos on (On or Auto) in the FFmpeg build: its movies go through our own sceMpeg
+// (as desktop PPSSPP plays them) instead of the mpeg.prx on its disc, whose run on top of our
+// sceVideocodec crashed the game. Off keeps the disc's module, where the video decoder failing to
+// open makes the game skip its movie.
+bool MediaGameUsesHLEMpeg() {
+#ifdef USE_FFMPEG
+	if (g_mediaVideoDecode == 0)
+		return false;
+	const std::string id = g_paramSFO.GetDiscID();
+	if (!IsKillzone(id))
+		return false;
+	FrontendTrace("Game fix: %s: videos on, played through the built-in sceMpeg (not the disc's mpeg.prx)", id.c_str());
+	return true;
+#else
+	return false;
+#endif
+}
+
+bool MediaVideoDecodeEnabled() {
+	if (g_mediaVideoDecode >= 0)
+		return g_mediaVideoDecode != 0;
+	// Decided once per game (the PS3 app runs one game after another).
+	static std::string decidedFor;
+	static bool enabled = true;
+	const std::string id = g_paramSFO.GetDiscID();
+	if (id != decidedFor || decidedFor.empty()) {
+		decidedFor = id.empty() ? std::string("?") : id;
+		// Killzone's movies used to be off here (they hung through the disc's mpeg.prx); they play
+		// through the built-in sceMpeg now (MediaGameUsesHLEMpeg), so every game gets its videos.
+		enabled = true;
+		FrontendTrace("Video cutscene starting (%s): decoding with FFmpeg", id.c_str());
+	}
+	return enabled;
+}
+
 bool MediaEngine::openContext(bool keepReadPos) {
 #ifdef USE_FFMPEG
+	if (!MediaVideoDecodeEnabled())
+		return true;  // As a build without FFmpeg.
 	InitFFmpeg();
 
 	if (m_pFormatCtx || !m_pdata)
 		return false;
+	// The decoder's buffers and the picture (480x272x4 = 510 KB) need room in one piece.
+	if (g_mediaMemoryHook)
+		g_mediaMemoryHook("a movie is opening", 2 * 1024 * 1024);
+	g_mediaStep = MEDIA_OPEN;
 	if (!keepReadPos) {
 		m_mpegheaderReadPos = 0;
 	}
@@ -300,11 +401,15 @@ bool MediaEngine::openContext(bool keepReadPos) {
 	// Open video file
     AVDictionary *open_opt = nullptr;
     av_dict_set_int(&open_opt, "probesize", m_mpegheaderSize, 0);
+	g_mediaStep = MEDIA_OPEN_INPUT;
 	if (avformat_open_input((AVFormatContext**)&m_pFormatCtx, nullptr, nullptr, &open_opt) != 0) {
 		av_dict_free(&open_opt);
+		g_mediaStep = MEDIA_IDLE;
+		FrontendTrace("Video: the movie could not be opened (header not readable, or no memory)");
 		return false;
 	}
 	av_dict_free(&open_opt);
+	g_mediaStep = MEDIA_STREAMS;
 
 	bool usedFFMPEGFindStreamInfo = false;
 	if (!SetupStreams() || PSP_CoreParameter().compat.flags().UseFFMPEGFindStreamInfo) {
@@ -343,12 +448,17 @@ bool MediaEngine::openContext(bool keepReadPos) {
 
 	// Here it shouldn't be possible for m_videoStream to be invalid.
 
-	if (!setVideoStream(m_videoStream, true))
+	g_mediaStep = MEDIA_CODEC;
+	if (!setVideoStream(m_videoStream, true)) {
+		g_mediaStep = MEDIA_IDLE;
+		FrontendTrace("Video: the movie's decoder could not be opened (no memory?)");
 		return false;
+	}
 
 	setVideoDim();
 	m_audioContext = CreateAudioDecoder((PSPAudioType)m_audioType);
 	m_isVideoEnd = false;
+	g_mediaStep = MEDIA_IDLE;
 
 	if (PSP_CoreParameter().compat.flags().UseFFMPEGFindStreamInfo && usedFFMPEGFindStreamInfo) {
 		m_mpegheaderReadPos++;
@@ -360,8 +470,10 @@ bool MediaEngine::openContext(bool keepReadPos) {
 
 void MediaEngine::closeContext() {
 #ifdef USE_FFMPEG
+#if !PPSSPP_PLATFORM(PS3)
 	if (m_buffer)
 		av_free(m_buffer);
+#endif
 	if (m_pFrameRGB)
 		av_frame_free(&m_pFrameRGB);
 	if (m_pFrame)
@@ -560,6 +672,16 @@ bool MediaEngine::setVideoStream(int streamNum, bool force) {
 #endif
 
 		m_pCodecCtx->flags |= AV_CODEC_FLAG_OUTPUT_CORRUPT | AV_CODEC_FLAG_LOW_DELAY;
+		// PS3 "Video deblocking: Off": skip H.264's deblocking filter and allow FFmpeg's faster, not
+		// bit-exact paths (the PS3 decodes on one PPU thread). A little blockier at 480x272, and much
+		// less decoding time on the PPU (Silent Hill Origins' menu movie: ~14 ms a picture with it,
+		// ~5-8 without). Auto starts with it on; see stepVideo.
+		m_deblockOff = g_mediaDeblock == 0;
+		m_speedStart = 0.0;
+		if (m_deblockOff) {
+			m_pCodecCtx->skip_loop_filter = AVDISCARD_ALL;
+			m_pCodecCtx->flags2 |= AV_CODEC_FLAG2_FAST;
+		}
 
 		AVDictionary *opt = nullptr;
 		// Allow ffmpeg to use any number of threads it wants.  Without this, it doesn't use threads.
@@ -626,13 +748,35 @@ bool MediaEngine::setVideoDim(int width, int height)
 	updateSwsFormat(GE_CMODE_32BIT_ABGR8888);
 
 	// Allocate video frame for RGB24
-	m_pFrameRGB = av_frame_alloc();
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 12, 100)
 	int numBytes = av_image_get_buffer_size((AVPixelFormat)m_sws_fmt, m_desWidth, m_desHeight, 1);
 #else
 	int numBytes = avpicture_get_size((AVPixelFormat)m_sws_fmt, m_desWidth, m_desHeight);
 #endif
+	const int stepBefore = g_mediaStep.exchange(MEDIA_PICTURE);
+#if PPSSPP_PLATFORM(PS3)
+	if (numBytes > s_pictureBufferSize) {
+		av_free(s_pictureBuffer);
+		s_pictureBuffer = (u8 *)av_malloc(numBytes);
+		s_pictureBufferSize = s_pictureBuffer ? numBytes : 0;
+	}
+	m_buffer = s_pictureBuffer;
+#else
+	if (m_buffer)
+		av_free(m_buffer);
 	m_buffer = (u8*)av_malloc(numBytes * sizeof(uint8_t));
+#endif
+	g_mediaStep = stepBefore;
+	if (!m_buffer) {
+		// With no buffer the colour conversion wrote through a null pointer. Without one the picture
+		// isn't converted (writeVideoImage writes nothing) and the next picture tries again.
+		static int logged = 0;
+		if (logged++ < 10)
+			FrontendTrace("Video: no memory for the %dx%d picture buffer (%d KB in one piece); picture not shown", m_desWidth, m_desHeight, numBytes >> 10);
+		return false;
+	}
+	if (!m_pFrameRGB)
+		m_pFrameRGB = av_frame_alloc();
 
 	// Assign appropriate parts of buffer to image planes in m_pFrameRGB
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 12, 100)
@@ -683,6 +827,13 @@ void MediaEngine::updateSwsFormat(int videoPixelMode) {
 
 bool MediaEngine::stepVideo(int videoPixelMode, bool skipFrame) {
 #ifdef USE_FFMPEG
+	if (!MediaVideoDecodeEnabled()) {
+		// Videos off (PS3 "videos=0"): as a build without FFmpeg, the video clock still moves on a frame
+		// at a time. Returning false here instead (no context was opened) left the clock at 0 for
+		// good, and Silent Hill Origins waited in its intro movie forever (build 208 log).
+		m_videopts += 3003;
+		return true;
+	}
 	auto codecIter = m_pCodecCtxs.find(m_videoStream);
 	AVCodecContext *m_pCodecCtx = codecIter == m_pCodecCtxs.end() ? 0 : codecIter->second;
 
@@ -693,11 +844,37 @@ bool MediaEngine::stepVideo(int videoPixelMode, bool skipFrame) {
 	if (!m_pFrame)
 		return false;
 
+	if (g_mediaDeblock < 0 && !m_deblockOff) {
+		// Auto deblocking: emulated time against real time over 2 s of this movie. Below 95% of full
+		// speed (the sound then runs dry and crackles), the filter goes for the rest of the movie.
+		// A gap of over half a second between pictures (a pause) starts the measurement again.
+		const double now = time_now_d();
+		const u64 ticks = CoreTiming::GetTicks(currentMIPS);
+		if (m_speedStart == 0.0 || now - m_speedLast > 0.5) {
+			m_speedStart = now;
+			m_speedTicks = ticks;
+		} else if (now - m_speedStart >= 2.0) {
+			const double speed = (double)cyclesToUs((s64)(ticks - m_speedTicks)) / 1000000.0 / (now - m_speedStart);
+			if (speed < 0.95) {
+				m_pCodecCtx->skip_loop_filter = AVDISCARD_ALL;
+				m_deblockOff = true;
+				FrontendTrace("Video: running at %.0f%% of full speed, deblocking off for the rest of this movie", speed * 100.0);
+			}
+			m_speedStart = now;
+			m_speedTicks = ticks;
+		}
+		m_speedLast = now;
+	}
+
 	AVPacket packet;
 	av_init_packet(&packet);
 	int frameFinished;
 	bool bGetFrame = false;
+	g_mediaStep = MEDIA_DECODE;
+	g_mediaReads = 0;
 	while (!bGetFrame) {
+		g_mediaStep = MEDIA_READ;
+		g_mediaReads++;
 		bool dataEnd = av_read_frame(m_pFormatCtx, &packet) < 0;
 		// Even if we've read all frames, some may have been re-ordered frames at the end.
 		// Still need to decode those, so keep calling avcodec_decode_video2() / avcodec_receive_frame().
@@ -712,8 +889,10 @@ bool MediaEngine::stepVideo(int videoPixelMode, bool skipFrame) {
 #endif
 
 #if LIBAVCODEC_VERSION_INT >= AV_VERSION_INT(57, 48, 101)
+			g_mediaStep = MEDIA_SEND;
 			if (packet.size != 0)
 				avcodec_send_packet(m_pCodecCtx, &packet);
+			g_mediaStep = MEDIA_RECEIVE;
 			int result = avcodec_receive_frame(m_pCodecCtx, m_pFrame);
 			if (result == 0) {
 				result = 1;
@@ -737,6 +916,7 @@ bool MediaEngine::stepVideo(int videoPixelMode, bool skipFrame) {
 					// Update the linesize for the new format too.  We started with the largest size, so it should fit.
 					m_pFrameRGB->linesize[0] = getPixelFormatBytes(videoPixelMode) * m_desWidth;
 
+					g_mediaStep = MEDIA_CONVERT;
 					sws_scale(m_sws_ctx, m_pFrame->data, m_pFrame->linesize, 0,
 						m_pCodecCtx->height, m_pFrameRGB->data, m_pFrameRGB->linesize);
 				}
@@ -783,6 +963,7 @@ bool MediaEngine::stepVideo(int videoPixelMode, bool skipFrame) {
 		av_free_packet(&packet);
 #endif
 	}
+	g_mediaStep = MEDIA_IDLE;
 	return bGetFrame;
 #else
 	// If video engine is not available, just add to the timestamp at least.
@@ -896,6 +1077,7 @@ int MediaEngine::writeVideoImage(u32 bufferPtr, int frameWidth, int videoPixelMo
 #ifdef USE_FFMPEG
 	if (!m_pFrame || !m_pFrameRGB)
 		return 0;
+	g_mediaStep = MEDIA_WRITE;
 
 	// lock the image size
 	// Rows can't be wider than the stride, or they'd overlap and the last would run past the end.
@@ -955,6 +1137,7 @@ int MediaEngine::writeVideoImage(u32 bufferPtr, int frameWidth, int videoPixelMo
 
 	NotifyMemInfo(MemBlockFlags::WRITE, bufferPtr, videoImageSize, "VideoDecode");
 
+	g_mediaStep = MEDIA_IDLE;
 	return videoImageSize;
 #endif // USE_FFMPEG
 	return 0;
@@ -1128,6 +1311,7 @@ int MediaEngine::getAudioSamples(u32 bufferPtr) {
 		if (!m_audioContext->Decode(audioFrame, frameSize, &inbytesConsumed, 2, buffer, &outSamples)) {
 			ERROR_LOG(Log::ME, "Audio (%s) decode failed during video playback", GetCodecName(m_audioType));
 		}
+		ConvertAudioSamplesToGuest(buffer, outSamples * 2);
 		int outBytes = outSamples * sizeof(int16_t) * 2;
 
 		NotifyMemInfo(MemBlockFlags::WRITE, bufferPtr, outBytes, "VideoDecodeAudio");

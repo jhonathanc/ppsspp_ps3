@@ -17,6 +17,8 @@
 
 #pragma once
 
+#include <map>
+
 #include "GPU/GPUDefinitions.h"
 #include "Core/MemMap.h"
 
@@ -63,3 +65,11 @@ bool __GeTriggerWait(GPUSyncType type, SceUID waitId);
 // Export functions for use by Util/PPGe
 u32 sceGeListEnQueue(MIPSState *mips, u32 listAddress, u32 stallAddress, int callbackId, u32 optParamAddr);
 u32 sceGeListEnQueueHead(MIPSState *mips, u32 listAddress, u32 stallAddress, int callbackId, u32 optParamAddr);
+
+// Video diagnostics (Core/HLE/sceMpeg.cpp prints and resets these once a second during a video).
+struct GeVideoStats {
+	int syncs = 0, waits = 0, woken = 0;
+	s64 syncAheadUs = 0, syncAheadMaxUs = 0, waitedUs = 0, waitedMaxUs = 0;
+	std::map<int, u64> waitStart;
+};
+extern GeVideoStats g_geVideoStats;

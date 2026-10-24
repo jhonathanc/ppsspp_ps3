@@ -90,9 +90,9 @@ extern u32 g_PSPModel;
 // Smaller only for homebrew on a PSP-2000+ that doesn't ask for the extra RAM (see CPU_Init).
 extern u32 g_UserPartitionSize;
 
-// UWP has such limited memory management that we need to mask
+// UWP and PS3 have such limited memory management that we need to mask
 // even in 64-bit mode. Also, when using the sanitizer, we need to mask as well.
-#if PPSSPP_ARCH(32BIT) || PPSSPP_PLATFORM(UWP) || USE_ASAN || PPSSPP_PLATFORM(IOS) || defined(__EMSCRIPTEN__)
+#if PPSSPP_ARCH(32BIT) || PPSSPP_PLATFORM(UWP) || PPSSPP_PLATFORM(PS3) || USE_ASAN || PPSSPP_PLATFORM(IOS) || defined(__EMSCRIPTEN__)
 #define MASKED_PSP_MEMORY
 #endif
 
@@ -108,8 +108,8 @@ enum {
 
 #ifdef MASKED_PSP_MEMORY
 	// This wraparound should work for PSP too.
-#if PPSSPP_ARCH(32BIT)
-	// 32-bit only reserves 256 MB at base. Valid addresses never have bits 28-29 set, so dropping them
+#if PPSSPP_ARCH(32BIT) || PPSSPP_PLATFORM(PS3)
+	// These hosts only reserve 256 MB at base. Valid addresses never have bits 28-29 set, so dropping them
 	// too keeps stray accesses inside the reservation, away from the heap.
 	MEMVIEW32_MASK  = 0x0FFFFFFF,
 #else
@@ -121,7 +121,7 @@ enum {
 	// kernel and uncached mirrors onto the same entry, the way they share physical memory.
 	// Where address space is short, bits 28-29 are dropped too, so garbage PCs with those bits
 	// set alias real code instead of faulting.
-#if PPSSPP_ARCH(64BIT) && !PPSSPP_PLATFORM(IOS) && !PPSSPP_PLATFORM(SWITCH)
+#if PPSSPP_ARCH(64BIT) && !PPSSPP_PLATFORM(IOS) && !PPSSPP_PLATFORM(SWITCH) && !PPSSPP_PLATFORM(PS3)
 	BLOCK_SHADOW_MASK = 0x3FFFFFFF,
 #else
 	BLOCK_SHADOW_MASK = 0x0FFFFFFF,

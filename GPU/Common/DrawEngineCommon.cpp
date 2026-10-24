@@ -47,14 +47,19 @@ DrawEngineCommon::DrawEngineCommon() : decoderMap_(32) {
 	if (g_Config.bVertexDecoderJit && PSP_CoreParameter().bUseVertexDecoderJit) {
 		decJitCache_ = new VertexDecoderJitCache();
 	}
+#if !PPSSPP_PLATFORM(PS3)
+	// The PS3 software frontend has its own transform buffers.
 	transformed_ = (TransformedVertex *)AllocateMemoryPages(TRANSFORMED_VERTEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 	transformedExpanded_ = (TransformedVertex *)AllocateMemoryPages(3 * TRANSFORMED_VERTEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
+#endif
 	decoded_ = (u8 *)AllocateMemoryPages(DECODED_VERTEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 	decIndex_ = (u16 *)AllocateMemoryPages(DECODED_INDEX_BUFFER_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 	bboxScratch_ = (u8 *)AllocateMemoryPages(BBOX_SCRATCH_SIZE, MEM_PROT_READ | MEM_PROT_WRITE);
 
+#if !PPSSPP_PLATFORM(PS3)
 	_dbg_assert_(transformed_);
 	_dbg_assert_(transformedExpanded_);
+#endif
 	_dbg_assert_(decoded_);
 	_dbg_assert_(decIndex_);
 	_dbg_assert_(bboxScratch_);
@@ -207,14 +212,20 @@ bool DrawEngineCommon::TestBoundingBox(const void *vdata, const void *inds, int 
 	if ((vertType & 0xFFFFFF) == GE_VTYPE_POS_FLOAT && !inds) {
 		// Most games that use bbox use floating point bboxes (Outrun, Tekken 6, Smash Court Tennis 3, Need for Speed Carbon etc).
 		// memcpy(verts, vdata, sizeof(float) * 3 * vertexCount);
+#if COMMON_BIG_ENDIAN
+		const float_le *vtx = (const float_le *)vdata;
+		for (int i = 0; i < vertexCount * 3; ++i)
+			verts[i] = vtx[i];
+#else
 		verts = (float *)vdata;
+#endif
 	} else if ((vertType & 0xFFFFFF) == GE_VTYPE_POS_8BIT && !inds) {
 		const s8 *vtx = (const s8 *)vdata;
 		for (int i = 0; i < vertexCount * 3; i++) {
 			verts[i] = vtx[i] * (1.0f / 128.0f);
 		}
 	} else if ((vertType & 0xFFFFFF) == GE_VTYPE_POS_16BIT && !inds) {
-		const s16 *vtx = (const s16 *)vdata;
+		const s16_le *vtx = (const s16_le *)vdata;
 		for (int i = 0; i < vertexCount * 3; i++) {
 			verts[i] = vtx[i] * (1.0f / 32768.0f);
 		}
@@ -634,7 +645,7 @@ bool DrawEngineCommon::TestBoundingBoxThrough(GEPrimitiveType prim, const void *
 		switch (vertType & GE_VTYPE_POS_MASK) {
 		case GE_VTYPE_POS_FLOAT:
 		{
-			const float *pos = (const float*)((const u8 *)vdata + stride * index + posOffset);
+			const float_le *pos = (const float_le *)((const u8 *)vdata + stride * index + posOffset);
 			x = pos[0];
 			y = pos[1];
 			z = pos[2];
@@ -651,7 +662,7 @@ bool DrawEngineCommon::TestBoundingBoxThrough(GEPrimitiveType prim, const void *
 		}
 		case GE_VTYPE_POS_16BIT:
 		{
-			const s16 *pos16 = (const s16 *)((const u8 *)vdata + stride * index + posOffset);
+			const s16_le *pos16 = (const s16_le *)((const u8 *)vdata + stride * index + posOffset);
 			x = pos16[0];
 			y = pos16[1];
 			z = (u16)pos16[2];
@@ -788,12 +799,12 @@ int DrawEngineCommon::ComputeNumVertsToDecode() const {
 // Takes a list of consecutive PRIM opcodes, and extends the current draw call to include them.
 // This is just a performance optimization. NOTE: This isn't compatible with really accurate culling,
 // unless we refactor things a bit.
-int DrawEngineCommon::ExtendNonIndexedPrim(const uint32_t *cmd, const uint32_t *stall, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, bool isTriangle, ClipInfoFlags clipInfoFlags) {
+int DrawEngineCommon::ExtendNonIndexedPrim(const u32_le *cmd, const u32_le *stall, const VertexDecoder *dec, u32 vertTypeID, bool clockwise, int *bytesRead, bool isTriangle, ClipInfoFlags clipInfoFlags) {
 	if (clipInfoFlags & ClipInfoFlags::Valid) {
 		clipInfoFlags_ |= clipInfoFlags;
 	}
 
-	const uint32_t *start = cmd;
+	const u32_le *start = cmd;
 	int prevDrawVerts = numDrawVerts_ - 1;
 	DeferredVerts &dv = drawVerts_[prevDrawVerts];
 	int offset = dv.vertexCount;

@@ -142,9 +142,14 @@ public:
 		return runRemaining_ > 0 && vertices == runNext_ && vertexType == runType_;
 	}
 	void SubmitImmVertex(const ClipVertexData &vert, SoftwareDrawEngine *drawEngine);
+	// A draw that only adds vertices to the open hardware T&L job (no GE state command since the
+	// last draw that joined it). False: not done, use SubmitPrimitive.
+	bool FastMergePrim(const void *vertices, const void *indices, GEPrimitiveType prim, int vertexCount, u32 vertexType, int *bytesRead);
 
 	void Flush(GPUCommon *common, const char *reason);
 	void FlushIfOverlap(GPUCommon *common, const char *reason, bool modifying, uint32_t addr, uint32_t stride, uint32_t w, uint32_t h);
+	// Drawing not yet in PSP memory overlaps this range (what FlushIfOverlap checks first).
+	bool HasPendingWrite(uint32_t addr, uint32_t stride, uint32_t w, uint32_t h);
 	void NotifyClutUpdate(const void *src);
 	void NotifyTexFlush();
 
@@ -153,6 +158,8 @@ public:
 	void SetDirty(SoftDirty flags);
 	SoftDirty GetDirty();
 
+public:
+	ClipVertexData ReadVertex(const VertexReader &vreader, const TransformState &state);
 	struct RunJob;
 
 	// ReadVertex's position stage, done ahead for several vertices at once.

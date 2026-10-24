@@ -368,6 +368,22 @@ extern const float cst_constants[32];
 // Both are cheap when the guest is in the default mode (by far the common case): they do nothing.
 // Otherwise apply reads the register once and restore just writes it back.
 void ApplyHostRoundingMode(const MIPSState *mips);
+// Whether FCR31 FS (flush denormals) is honoured on the host FPU/AltiVec (PowerPC: FPSCR NI, VSCR NJ).
+// PS3 frontend setting "ftz": 1 on, 0 off, -1 auto (on).
+extern int g_flushDenormalsSetting;
+inline bool HostFlushDenormals() { return g_flushDenormalsSetting != 0; }
 // force also clears our bits when apply didn't set them, for callers that may run under a native
 // JIT, whose own asm stubs apply the mode.
 void RestoreHostRoundingMode(bool force = false);
+
+inline void FlushGuestFPUResult(MIPSState *mips, int reg) {
+#if PPSSPP_ARCH(POWERPC)
+	// The portable host rounding API cannot implement FS (cpu/fpu/fpu). VFPU registers (32 and up
+	// in IR) are always flushed, as the PSP's VFPU does and the PPC JIT's AltiVec mode (VSCR NJ)
+	// already did: Dead to Rights' disarm normalized a vector whose squared length was a
+	// denormal (0 on a PSP, so the game skipped it), got 1/0 = infinity and fell through the world.
+	if ((mips->fi[reg] & 0x7F800000) == 0 && ((mips->fcr31 & 0x01000000) || (reg >= 32 && HostFlushDenormals()))) {
+		mips->fi[reg] &= 0x80000000;
+	}
+#endif
+}

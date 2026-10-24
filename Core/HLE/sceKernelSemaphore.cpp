@@ -235,7 +235,7 @@ int sceKernelSignalSema(SceUID id, int signal) {
 	} else {
 		// Done in 64-bit so a huge signal value can't overflow its way past the check.
 		if ((s64)s->ns.currentCount + signal - (s64)s->waitingThreads.size() > s->ns.maxCount) {
-			return hleLogDebug(Log::sceKernel, SCE_KERNEL_ERROR_SEMA_OVF, "overflow at %d", s->ns.currentCount);
+			return hleLogDebug(Log::sceKernel, SCE_KERNEL_ERROR_SEMA_OVF, "overflow at %d", (int)s->ns.currentCount);
 		}
 
 		int oldval = s->ns.currentCount;
@@ -257,7 +257,7 @@ retry:
 			hleReSchedule("semaphore signaled");
 
 		hleEatCycles(900);
-		return hleLogDebug(Log::sceKernel, 0, "sceKernelSignalSema(%i, %i) (count: %i -> %i)", id, signal, oldval, s->ns.currentCount);
+		return hleLogDebug(Log::sceKernel, 0, "sceKernelSignalSema(%i, %i) (count: %i -> %i)", id, signal, oldval, (int)s->ns.currentCount);
 	}
 }
 

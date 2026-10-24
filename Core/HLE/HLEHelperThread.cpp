@@ -32,7 +32,8 @@ HLEHelperThread::HLEHelperThread(const char *threadName, const u32 instructions[
 	u32 totalBytes = instrBytes + sizeof(u32) * 2;
 	AllocEntry(totalBytes);
 	_dbg_assert_(Memory::IsValid4AlignedAddress(entry_));  // after AllocEntry.
-	Memory::Memcpy(entry_, instructions, instrBytes, "HelperMIPS");
+	for (u32 i = 0; i < instrCount; ++i)
+		Memory::WriteUnchecked_U32(instructions[i], entry_ + i * sizeof(u32));
 
 	// Just to simplify things, we add the return here.
 	Memory::WriteUnchecked_U32(MIPS_MAKE_JR_RA(), entry_ + instrBytes + 0);

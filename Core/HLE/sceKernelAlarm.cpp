@@ -169,7 +169,8 @@ KernelObject *__KernelAlarmObject() {
 // for a while, when it counts from now instead of firing to catch up (threads/alarm/alarm).
 void __KernelScheduleAlarm(PSPAlarm *alarm, u64 micro) {
 	const u64 now = CoreTiming::GetGlobalTimeUs();
-	alarm->alm.schedule = alarm->alm.schedule + micro > now ? alarm->alm.schedule + micro : now + micro;
+	const u64 deadline = (u64)alarm->alm.schedule + micro;
+	alarm->alm.schedule = deadline > now ? deadline : now + micro;
 	CoreTiming::ScheduleEvent(usToCycles(alarm->alm.schedule - now), alarmTimer, alarm->GetUID());
 }
 

@@ -59,9 +59,13 @@ int LoadZIMPtr(const uint8_t *zim, size_t datasize, int *width, int *height, int
 		ERROR_LOG(Log::IO, "Not a ZIM file");
 		return 0;
 	}
-	memcpy(width, zim + 4, 4);
-	memcpy(height, zim + 8, 4);
-	memcpy(flags, zim + 12, 4);
+	// ZIM headers are little-endian on disk.
+	auto readLE32 = [](const uint8_t *p) -> int {
+		return (int)((uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
+	};
+	*width = readLE32(zim + 4);
+	*height = readLE32(zim + 8);
+	*flags = readLE32(zim + 12);
 
 	if (*width <= 0 || *height <= 0) {
 		ERROR_LOG(Log::IO, "Invalid ZIM dimensions %i x %i", *width, *height);

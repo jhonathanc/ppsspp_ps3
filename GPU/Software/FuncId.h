@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include "Common/Swap.h"
 #include <functional>
 
 #include "GPU/ge_constants.h"
@@ -175,8 +176,8 @@ struct SamplerID {
 		uint32_t clutFormat;
 		union {
 			const uint8_t *clut;
-			const uint16_t *clut16;
-			const uint32_t *clut32;
+			const u16_le *clut16;
+			const u32_le *clut32;
 		};
 	} cached;
 
@@ -217,7 +218,30 @@ struct SamplerID {
 	GETexFunc TexFunc() const {
 		return GETexFunc(texFunc);
 	}
+
 };
+
+// Bytes at the start of a sampler's CLUT that its texture's indices can reach (after the palette
+// shift, mask and offset): the rest can't change what it draws. 1024 for a non-CLUT format.
+inline uint32_t ClutBytesUsed(const SamplerID &id) {
+	const GETextureFormat fmt = id.TexFmt();
+	const uint32_t rawMax = fmt == GE_TFMT_CLUT4 ? 15 : (fmt == GE_TFMT_CLUT8 ? 255 : 0xFFFFFFFF);
+	const bool is32 = id.ClutFmt() == GE_CMODE_32BIT_ABGR8888;
+	uint32_t maxIdx;
+	if (id.hasClutShift || id.hasClutMask || id.hasClutOffset) {
+		const uint32_t shift = (id.cached.clutFormat >> 2) & 0x1F;
+		const uint32_t mask = (id.cached.clutFormat >> 8) & 0xFF;
+		const uint32_t offset = (((id.cached.clutFormat >> 16) & 0x1F) << 4) & (is32 ? 0xFF : 0x1FF);
+		uint32_t v = std::min(rawMax >> shift, mask);
+		// Any value up to v, OR'ed with the offset: at most all bits below v's top bit, plus the offset.
+		v |= v >> 1; v |= v >> 2; v |= v >> 4; v |= v >> 8; v |= v >> 16;
+		maxIdx = v | offset;
+	} else {
+		maxIdx = std::min(rawMax, 0xFFu);
+	}
+	const uint32_t bytes = (maxIdx + 1) * (is32 ? 4 : 2);
+	return std::min(bytes, 1024u);
+}
 
 void ComputePixelFuncID(PixelFuncID *id);
 void ComputeSamplerID(SamplerID *id);

@@ -217,6 +217,9 @@ bool Server::Listen4(int port, const char *reason) {
 
 	struct sockaddr_in server_addr;
 	memset(&server_addr, 0, sizeof(server_addr));
+#if PPSSPP_PLATFORM(PS3)
+	server_addr.sin_len = sizeof(server_addr);
+#endif
 	server_addr.sin_family = AF_INET;
 	server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
 	server_addr.sin_port = htons(port);
@@ -255,7 +258,7 @@ bool Server::Listen4(int port, const char *reason) {
 }
 
 bool Server::Listen6(int port, bool ipv6_only, const char *reason) {
-#if !PPSSPP_PLATFORM(SWITCH)
+#if !PPSSPP_PLATFORM(SWITCH) && !PPSSPP_PLATFORM(PS3)
 	listenerSock_ = socket(AF_INET6, SOCK_STREAM, 0);
 	if (listenerSock_ < 0)
 		return false;
@@ -321,7 +324,7 @@ bool Server::RunSlice(double timeout) {
 	union {
 		struct sockaddr sa;
 		struct sockaddr_in ipv4;
-#if !PPSSPP_PLATFORM(SWITCH)
+#if !PPSSPP_PLATFORM(SWITCH) && !PPSSPP_PLATFORM(PS3)
 		struct sockaddr_in6 ipv6;
 #endif
 	} client_addr;

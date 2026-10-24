@@ -766,6 +766,7 @@ static u32 sceMp3LowLevelDecode(u32 mp3, u32 sourceAddr, u32 sourceBytesConsumed
 	if (!ctx->decoder->Decode(inbuff, 4096, &inbytesConsumed, 2, outbuf, &outSamples)) {
 		WARN_LOG(Log::ME, "sceMp3LowLevelDecode: Decode failed");
 	}
+	ConvertAudioSamplesToGuest(outbuf, outSamples * 2);
 	int outBytes = outSamples * sizeof(int16_t) * 2;
 	NotifyMemInfo(MemBlockFlags::WRITE, samplesAddr, outBytes, "Mp3LowLevelDecode");
 	

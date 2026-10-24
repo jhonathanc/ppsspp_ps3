@@ -768,7 +768,7 @@ u64 DiskCachingFileLoaderCache::FreeDiskSpace() {
 u32 DiskCachingFileLoaderCache::DetermineMaxBlocks() {
 	const s64 freeBytes = FreeDiskSpace();
 	// We want to leave them some room for other stuff.
-	const u64 availBytes = std::max(0LL, freeBytes - SAFETY_FREE_DISK_SPACE);
+	const u64 availBytes = std::max<s64>(0, freeBytes - SAFETY_FREE_DISK_SPACE);
 	const u64 freeBlocks = availBytes / (u64)DEFAULT_BLOCK_SIZE;
 
 	const u32 alreadyCachedCount = CountCachedFiles();

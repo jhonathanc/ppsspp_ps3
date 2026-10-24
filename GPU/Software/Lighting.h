@@ -76,4 +76,8 @@ void ComputeState(State *state, bool hasColor0);
 void GenerateLightST(VertexData &vertex, Vec4F32 modelpos, Vec4F32 worldnormal, float normalRsqrt, Vec4F32 viewDir);
 void Process(VertexData &vertex, Vec4F32 modelpos, Vec4F32 worldnormal, float normalRsqrt, const State &state);
 
+// Plain float versions for the batched hardware path: world space position, normalized world normal.
+void GenerateLightSTFast(VertexData &vertex, const Vec3f &worldpos, const Vec3f &worldnormal, const Vec3f &viewDir);
+void ProcessFast(VertexData &vertex, const Vec3f &worldpos, const Vec3f &worldnormal, const State &state);
+
 }

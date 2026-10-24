@@ -16,6 +16,7 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 #include <algorithm>
+#include "Common/FrontendTrace.h"
 #include <atomic>
 #include <cstring>
 #include <mutex>
@@ -31,6 +32,7 @@
 #include "Core/CoreTiming.h"
 #include "Core/Debugger/Breakpoints.h"
 #include "Core/Debugger/MemBlockInfo.h"
+#include "GPU/GPUCommon.h"
 #include "Core/HLE/sceKernelModule.h"  // for DescribeAddress
 #include "Core/MIPS/MIPS.h"
 #include "Common/StringUtils.h"
@@ -521,12 +523,88 @@ static inline bool MergeRecentMemInfo(const PendingNotifyMem &info, size_t copyL
 	return false;
 }
 
+#if PPSSPP_PLATFORM(PS3)
+
+
+// Display list memory the game handed to the GE recently: an emulated (HLE) write into it is
+// reported, to find what overwrote Midnight Club L.A.'s lists with data (Frontend 116).
+static uint32_t g_geListWatch[8][2];
+static int g_geListWatchNext = 0;
+static int g_geListWatchLogs = 0;
+
+void GeListWatchNote(uint32_t listpc, uint32_t stall) {
+	listpc &= 0x3FFFFFFF;
+	stall &= 0x3FFFFFFF;
+	if (listpc < 0x08400000)
+		return;  // PPGe's list (kernel memory). Volatile memory (0x08400000) games use themselves.
+	for (auto &w : g_geListWatch) {
+		if (w[0] == listpc) {
+			if (stall > w[1]) w[1] = stall;
+			return;
+		}
+	}
+	uint32_t *w = g_geListWatch[g_geListWatchNext];
+	g_geListWatchNext = (g_geListWatchNext + 1) & 7;
+	w[0] = listpc;
+	w[1] = stall > listpc ? stall : listpc + 0x4000;
+	static int newLists = 0;
+	if (newLists < 12 && FrontendLogOn(FrontendLog::GE_WATCH)) {
+		newLists++;
+		FrontendTrace("GE list watch: list at %08x (stall %08x)", listpc, stall);
+	}
+}
+
+void GeListWatchStall(uint32_t listpc, uint32_t stall) {
+	listpc &= 0x3FFFFFFF;
+	stall &= 0x3FFFFFFF;
+	for (auto &w : g_geListWatch) {
+		if (w[0] == listpc && stall > w[1])
+			w[1] = stall;
+	}
+}
+
+static void GeListWatchCheck(uint32_t start, uint32_t size, uint32_t pc, const char *tag, size_t tagLen) {
+	if (g_geListWatchLogs >= 40 || !FrontendLogOn(FrontendLog::GE_WATCH))
+		return;
+	start &= 0x3FFFFFFF;
+	uint32_t ls, le;
+	if (GeVramListOverlap(start, start + size, &ls, &le)) {
+		g_geListWatchLogs++;
+		FrontendTrace("GE list watch: %.*s wrote %08x-%08x (pc %08x) over the sub-list in VRAM at %08x-%08x",
+			(int)std::min<size_t>(tagLen, 96), tag, start, start + size, pc, ls, le);
+		return;
+	}
+	// The system dialogs' own display list (PPGe, in kernel memory) is rewritten every frame.
+	if (start < 0x08400000 || (tagLen >= 4 && memcmp(tag, "PPGe", 4) == 0))
+		return;
+	for (const auto &w : g_geListWatch) {
+		if (w[0] && start < w[1] && start + size > w[0]) {
+			g_geListWatchLogs++;
+			FrontendTrace("GE list watch: %.*s wrote %08x-%08x (pc %08x) over display list memory %08x-%08x",
+				(int)std::min<size_t>(tagLen, 96), tag, start, start + size, pc, w[0], w[1]);
+			return;
+		}
+	}
+}
+void GeListWatchWrite(uint32_t start, uint32_t size, const char *tag) {
+	GeListWatchCheck(start, size, currentMIPS->pc, tag, strlen(tag));
+}
+#else
+void GeListWatchNote(uint32_t listpc, uint32_t stall) {}
+void GeListWatchStall(uint32_t listpc, uint32_t stall) {}
+void GeListWatchWrite(uint32_t start, uint32_t size, const char *tag) {}
+#endif
+
 void NotifyMemInfoPC(MemBlockFlags flags, uint32_t start, uint32_t size, uint32_t pc, const char *tagStr, size_t strLength) {
 	if (size == 0) {
 		return;
 	}
 	// Clear the uncached and kernel bits.
 	start = NormalizeAddress(start);
+#if PPSSPP_PLATFORM(PS3)
+	if (flags & MemBlockFlags::WRITE)
+		GeListWatchCheck(start, size, pc, tagStr, strLength);
+#endif
 
 	bool needFlush = false;
 	// When the setting is off, we skip smaller info to keep things fast.
@@ -582,6 +660,9 @@ void NotifyMemInfo(MemBlockFlags flags, uint32_t start, uint32_t size, const cha
 void NotifyMemInfoCopy(uint32_t destPtr, uint32_t srcPtr, uint32_t size, const char *prefix, size_t prefixLen) {
 	if (size == 0)
 		return;
+#if PPSSPP_PLATFORM(PS3)
+	GeListWatchCheck(destPtr, size, currentMIPS->pc, prefix, prefixLen);
+#endif
 
 	bool needsFlush = false;
 	if (g_breakpoints.HasMemChecks()) {

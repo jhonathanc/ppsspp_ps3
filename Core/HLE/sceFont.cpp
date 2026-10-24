@@ -960,7 +960,9 @@ bool NandFontsComplete() {
 // Most UMDs carry a firmware updater, so if we're missing real fonts we can pull them out of
 // whatever game is running rather than making the user find an updater themselves. Our bundled
 // substitutes are a good deal worse - some homebrew even trips over them.
-static bool InstallFontsFromDiscUpdater() {
+bool g_fontsFromDisc = false;
+
+bool InstallFontsFromDiscUpdater() {
 	if (!MountedDiscHasUpdater()) {
 		return false;
 	}
@@ -1003,7 +1005,7 @@ static void __LoadInternalFonts() {
 	const bool checkClassicOverrides = pspFileSystem.GetFileInfo(fontOverridePath).exists;
 	if (checkClassicOverrides) {
 		WARN_LOG(Log::sceFont, "Classic font overrides active, ignoring NAND: %s", fontOverridePath.c_str());
-	} else if (!NandFontsComplete()) {
+	} else if (g_fontsFromDisc && !NandFontsComplete()) {
 		InstallFontsFromDiscUpdater();
 	}
 
@@ -1199,7 +1201,9 @@ static u32 sceFontOpen(u32 libHandle, u32 index, u32 mode, u32 errorCodePtr) {
 	}
 
 	FontOpenMode openMode = mode != 1 ? FONT_OPEN_INTERNAL_STINGY : FONT_OPEN_INTERNAL_FULL;
-	LoadedFont *font = fontLib->OpenFont(internalFonts[index], openMode, *errorCode);
+	int nativeError = *errorCode;
+	LoadedFont *font = fontLib->OpenFont(internalFonts[index], openMode, nativeError);
+	*errorCode = nativeError;
 	if (font) {
 		*errorCode = 0;
 		// Delay only on the first open.
@@ -1240,7 +1244,9 @@ static u32 sceFontOpenUserMemory(u32 libHandle, u32 memoryFontPtr, u32 memoryFon
 		--memoryFontLength;
 	}
 	Font *f = new Font(fontData, memoryFontLength);
-	LoadedFont *font = fontLib->OpenFont(f, FONT_OPEN_USERBUFFER, *errorCode);
+	int nativeError = *errorCode;
+	LoadedFont *font = fontLib->OpenFont(f, FONT_OPEN_USERBUFFER, nativeError);
+	*errorCode = nativeError;
 	if (font) {
 		*errorCode = 0;
 		return hleLogDebug(Log::sceFont, font->Handle());
@@ -1280,7 +1286,9 @@ static u32 sceFontOpenUserFile(u32 libHandle, const char *fileName, u32 mode, u3
 
 	Font *f = new Font(buffer);
 	FontOpenMode openMode = mode == 0 ? FONT_OPEN_USERFILE_HANDLERS : FONT_OPEN_USERFILE_FULL;
-	LoadedFont *font = fontLib->OpenFont(f, openMode, *errorCode);
+	int nativeError = *errorCode;
+	LoadedFont *font = fontLib->OpenFont(f, openMode, nativeError);
+	*errorCode = nativeError;
 	if (font) {
 		*errorCode = 0;
 		return hleLogInfo(Log::sceFont, font->Handle());
@@ -1323,7 +1331,7 @@ static int sceFontFindOptimumFont(u32 libHandle, u32 fontStylePtr, u32 errorCode
 	}
 
 	auto requestedStyle = PSPPointer<const PGFFontStyle>::Create(fontStylePtr);
-	DEBUG_LOG(Log::sceFont, "requestedStyle fontAttributes %i,fontCountry %i,fontExpire %i,fontFamily %i,fontFileName %s,fontH %f,fontHRes %f,fontLanguage %i,fontName %s,fontRegion %i,fontStyle %i,fontStyleSub %i,fontV %f,fontVRes %f,fontWeight %f", requestedStyle->fontAttributes, requestedStyle->fontCountry, requestedStyle->fontExpire, requestedStyle->fontFamily, requestedStyle->fontFileName, requestedStyle->fontH, requestedStyle->fontHRes, requestedStyle->fontLanguage, requestedStyle->fontName, requestedStyle->fontRegion, requestedStyle->fontStyle, requestedStyle->fontStyleSub, requestedStyle->fontV, requestedStyle->fontVRes, requestedStyle->fontWeight);
+	DEBUG_LOG(Log::sceFont, "requestedStyle fontAttributes %i,fontCountry %i,fontExpire %i,fontFamily %i,fontFileName %s,fontH %f,fontHRes %f,fontLanguage %i,fontName %s,fontRegion %i,fontStyle %i,fontStyleSub %i,fontV %f,fontVRes %f,fontWeight %f", (int)requestedStyle->fontAttributes, (int)requestedStyle->fontCountry, (int)requestedStyle->fontExpire, (int)requestedStyle->fontFamily, requestedStyle->fontFileName, (double)requestedStyle->fontH, (double)requestedStyle->fontHRes, (int)requestedStyle->fontLanguage, requestedStyle->fontName, (int)requestedStyle->fontRegion, (int)requestedStyle->fontStyle, (int)requestedStyle->fontStyleSub, (double)requestedStyle->fontV, (double)requestedStyle->fontVRes, (double)requestedStyle->fontWeight);
 
 	// Find the first nearest match for H/V, OR the last exact match for others.
 	float hRes = requestedStyle->fontHRes > 0.0f ? (float)requestedStyle->fontHRes : fontLib->FontHRes();
@@ -1392,7 +1400,7 @@ static int sceFontFindFont(u32 libHandle, u32 fontStylePtr, u32 errorCodePtr) {
 	DEBUG_LOG(Log::sceFont, "sceFontFindFont(%x, %x, %x)", libHandle, fontStylePtr, errorCodePtr);
 
 	auto requestedStyle = PSPPointer<const PGFFontStyle>::Create(fontStylePtr);
-	DEBUG_LOG(Log::sceFont, "requestedStyle fontAttributes %i,fontCountry %i,fontExpire %i,fontFamily %i,fontFileName %s,fontH %f,fontHRes %f,fontLanguage %i,fontName %s,fontRegion %i,fontStyle %i,fontStyleSub %i,fontV %f,fontVRes %f,fontWeight %f", requestedStyle->fontAttributes, requestedStyle->fontCountry, requestedStyle->fontExpire, requestedStyle->fontFamily, requestedStyle->fontFileName, requestedStyle->fontH, requestedStyle->fontHRes, requestedStyle->fontLanguage, requestedStyle->fontName, requestedStyle->fontRegion, requestedStyle->fontStyle, requestedStyle->fontStyleSub, requestedStyle->fontV, requestedStyle->fontVRes, requestedStyle->fontWeight);
+	DEBUG_LOG(Log::sceFont, "requestedStyle fontAttributes %i,fontCountry %i,fontExpire %i,fontFamily %i,fontFileName %s,fontH %f,fontHRes %f,fontLanguage %i,fontName %s,fontRegion %i,fontStyle %i,fontStyleSub %i,fontV %f,fontVRes %f,fontWeight %f", (int)requestedStyle->fontAttributes, (int)requestedStyle->fontCountry, (int)requestedStyle->fontExpire, (int)requestedStyle->fontFamily, requestedStyle->fontFileName, (double)requestedStyle->fontH, (double)requestedStyle->fontHRes, (int)requestedStyle->fontLanguage, requestedStyle->fontName, (int)requestedStyle->fontRegion, (int)requestedStyle->fontStyle, (int)requestedStyle->fontStyleSub, (double)requestedStyle->fontV, (double)requestedStyle->fontVRes, (double)requestedStyle->fontWeight);
 
 	// Find the closest exact match for the fields specified.
 	float hRes = requestedStyle->fontHRes > 0.0f ? (float)requestedStyle->fontHRes : fontLib->FontHRes();
@@ -1524,7 +1532,7 @@ static int sceFontGetCharImageRect(u32 fontHandle, u32 charCode, u32 charRectPtr
 	font->GetCharInfo(charCode, &charInfo);
 	charRect->width = charInfo.bitmapWidth;
 	charRect->height = charInfo.bitmapHeight;
-	return hleLogDebug(Log::sceFont, 0, "w: %d h: %d", charInfo.bitmapWidth, charInfo.bitmapHeight);
+	return hleLogDebug(Log::sceFont, 0, "w: %d h: %d", (int)charInfo.bitmapWidth, (int)charInfo.bitmapHeight);
 }
 
 static int sceFontGetShadowImageRect(u32 fontHandle, u32 charCode, u32 charRectPtr) {

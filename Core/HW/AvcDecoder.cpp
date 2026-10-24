@@ -56,6 +56,10 @@ extern "C" {
 
 AvcDecoder::AvcDecoder() {
 #ifdef USE_FFMPEG
+	// Videos off for this game (setting "videos"; auto: Killzone): no decoder at all, exactly as
+	// a build without FFmpeg (every Decode returns no frame).
+	if (!MediaVideoDecodeEnabled())
+		return;
 	AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
 	if (!codec) {
 		ERROR_LOG(Log::ME, "AvcDecoder: no H.264 decoder in this ffmpeg build");
@@ -126,7 +130,10 @@ AvcDecoder::~AvcDecoder() {
 
 bool AvcDecoder::IsAvailable() {
 #ifdef USE_FFMPEG
-	return true;
+	// Videos off for this game: sceVideocodecOpen fails as in a build without FFmpeg, and the
+	// game's movie player gives up there (Killzone: on success it went on to a movie object it
+	// never set up, and crashed on it).
+	return MediaVideoDecodeEnabled();
 #else
 	return false;
 #endif

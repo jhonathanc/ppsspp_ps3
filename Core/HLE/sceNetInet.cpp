@@ -143,7 +143,7 @@ static u32 sceNetInetInetNtop(int af, u32 srcInAddrPtr, u32 dstBufPtr, u32 bufsi
 	return hleLogDebug(Log::sceNet, dstBufPtr, "%s", safe_string(Memory::GetCharPointer(dstBufPtr)));
 }
 
-static u32_le sceNetInetInetAddr(const char *hostname) {
+static u32 sceNetInetInetAddr(const char *hostname) {
 	if (hostname == nullptr || hostname[0] == '\0') {
 		return hleLogError(Log::sceNet, INADDR_NONE, "invalid arg");
 	}
@@ -170,6 +170,9 @@ static int sceNetInetGetpeername(int socket, u32 namePtr, u32 namelenPtr) {
 	SockAddrIN4 saddr{};
 	// TODO: Should've created convertSockaddrPSP2Host (and Host2PSP too) function as it's being used pretty often, thus fixing a bug on it will be tedious when scattered all over the places
 	saddr.addr.sa_family = name->sa_family;
+#if PPSSPP_PLATFORM(PS3)
+	saddr.addr.sa_len = sizeof(sockaddr_in);
+#endif
 	int len = std::min(*namelen > 0 ? *namelen : 0, static_cast<int>(sizeof(saddr)));
 	name->sa_len = len;
 	memcpy(saddr.addr.sa_data, name->sa_data, sizeof(name->sa_data));
@@ -203,6 +206,9 @@ static int sceNetInetGetsockname(int socket, u32 namePtr, u32 namelenPtr) {
 	int* namelen = (int*)Memory::GetPointerOrException(namelenPtr);
 	SockAddrIN4 saddr{};
 	saddr.addr.sa_family = name->sa_family;
+#if PPSSPP_PLATFORM(PS3)
+	saddr.addr.sa_len = sizeof(sockaddr_in);
+#endif
 	int len = std::min(*namelen > 0 ? *namelen : 0, static_cast<int>(sizeof(saddr)));
 	name->sa_len = len;
 	memcpy(saddr.addr.sa_data, name->sa_data, sizeof(name->sa_data));
@@ -405,7 +411,7 @@ int sceNetInetPoll(MIPSState *mips, u32 fdsPtr, u32 nfds, int timeout) { // time
 			fdarray[i].revents |= (INET_POLLRDBAND | INET_POLLPRI | INET_POLLERR); //POLLEX_SET; // Can be raised on revents regardless of events bitmask?
 		if (fdarray[i].revents)
 			retval++;
-		VERBOSE_LOG(Log::sceNet, "Poll Socket#%d Fd: %d, events: %04x, revents: %04x, availToRecv: %d", i, fdarray[i].fd, fdarray[i].events, fdarray[i].revents, (int)getAvailToRecv(fdarray[i].fd));
+		VERBOSE_LOG(Log::sceNet, "Poll Socket#%d Fd: %d, events: %04x, revents: %04x, availToRecv: %d", i, (int)fdarray[i].fd, (unsigned int)fdarray[i].events, (unsigned int)fdarray[i].revents, (int)getAvailToRecv(fdarray[i].fd));
 	}
 	//hleEatMicro(1000);
 	return hleDelayResult(hleLogDebug(Log::sceNet, retval), "workaround until blocking-socket", 1000); // Using hleDelayResult as a workaround for games that need blocking-socket to be implemented
@@ -614,7 +620,7 @@ static int sceNetInetGetsockopt(MIPSState *mips, int socket, int level, int optn
 		UpdateErrnoFromHost(__KernelGetCurThread(), socket_errno, __FUNCTION__);
 		return hleLogError(Log::sceNet, retval);
 	}
-	DEBUG_LOG(Log::sceNet, "SockOpt: OptValue = %d", *optval);
+	DEBUG_LOG(Log::sceNet, "SockOpt: OptValue = %d", (int)*optval);
 	return hleLogDebug(Log::sceNet, retval);
 }
 
@@ -630,6 +636,9 @@ static int sceNetInetBind(MIPSState *mips, int socket, u32 namePtr, int namelen)
 	SockAddrIN4 saddr{};
 	// TODO: Should've created convertSockaddrPSP2Host (and Host2PSP too) function as it's being used pretty often, thus fixing a bug on it will be tedious when scattered all over the places
 	saddr.addr.sa_family = name->sa_family;
+#if PPSSPP_PLATFORM(PS3)
+	saddr.addr.sa_len = sizeof(sockaddr_in);
+#endif
 	int len = std::min(namelen > 0 ? namelen : 0, static_cast<int>(sizeof(saddr)));
 	memcpy(saddr.addr.sa_data, name->sa_data, sizeof(name->sa_data));
 	// The address rewrites below are for talking to ad hoc peers (each instance on localhost gets its own
@@ -694,6 +703,9 @@ static int sceNetInetConnect(int socket, u32 sockAddrPtr, int sockAddrLen) {
 	SockAddrIN4 saddr{};
 	int dstlen = std::min(sockAddrLen > 0 ? sockAddrLen : 0, static_cast<int>(sizeof(saddr)));
 	saddr.addr.sa_family = dst->sa_family;
+#if PPSSPP_PLATFORM(PS3)
+	saddr.addr.sa_len = sizeof(sockaddr_in);
+#endif
 	memcpy(saddr.addr.sa_data, dst->sa_data, sizeof(dst->sa_data));
 
 	// Enforcing real blocking-mode on games that use blocking-mode socket (as a temporary fix for UNO), since we don't simulate blocking-mode yet
@@ -739,7 +751,11 @@ static int sceNetInetListen(int socket, int backlog) {
 		return hleLogError(Log::sceNet, ERROR_INET_EBADF, "Bad socket #%d", socket);
 	}
 
+#if PPSSPP_PLATFORM(PS3)
+	int retval = listen(inetSock->sock, backlog);
+#else
 	int retval = listen(inetSock->sock, (backlog == PSP_NET_INET_SOMAXCONN ? SOMAXCONN : backlog));
+#endif
 	if (retval < 0) {
 		UpdateErrnoFromHost(__KernelGetCurThread(), socket_errno, __FUNCTION__);
 		return hleLogError(Log::sceNet, retval);
@@ -903,6 +919,9 @@ static int sceNetInetSendto(int socket, u32 bufferPtr, int len, int flags, u32 t
 	int dstlen = std::min(tolen > 0 ? tolen : 0, static_cast<int>(sizeof(saddr)));
 	if (dst) {
 		saddr.addr.sa_family = dst->sa_family;
+#if PPSSPP_PLATFORM(PS3)
+		saddr.addr.sa_len = sizeof(sockaddr_in);
+#endif
 		memcpy(saddr.addr.sa_data, dst->sa_data, sizeof(dst->sa_data));
 	}
 
@@ -978,6 +997,13 @@ static int sceNetInetSendmsg(int socket, u32 msghdrPtr, int flags) {
 	}
 
 	InetMsghdr* pspMsghdr = (InetMsghdr*)Memory::GetPointerOrException(msghdrPtr);
+#if PPSSPP_PLATFORM(PS3)
+	// Guest ancillary headers need explicit endian/layout conversion.
+	if (pspMsghdr->msg_controllen != 0) {
+		UpdateErrnoFromHost(__KernelGetCurThread(), EOPNOTSUPP, __FUNCTION__);
+		return hleLogError(Log::sceNet, -1, "ancillary data unsupported on PS3");
+	}
+#endif
 	int flgs = flags & ~PSP_NET_INET_MSG_DONTWAIT; // removing non-POSIX flag, which is an alternative way to use non-blocking mode
 	flgs = convertMSGFlagsPSP2Host(flgs);
 	SockAddrIN4 saddr{};
@@ -1001,7 +1027,20 @@ static int sceNetInetSendmsg(int socket, u32 msghdrPtr, int flags) {
 	if (pspMsghdr->msg_name != 0) {
 		SceNetInetSockaddr* pspSaddr = (SceNetInetSockaddr*)Memory::GetPointerOrException(pspMsghdr->msg_name);
 		saddr.addr.sa_family = pspSaddr->sa_family;
-		size_t datalen = std::min(pspMsghdr->msg_namelen - (sizeof(pspSaddr->sa_len) + sizeof(pspSaddr->sa_family)), sizeof(saddr.addr.sa_data));
+#if PPSSPP_PLATFORM(PS3)
+		saddr.addr.sa_len = sizeof(sockaddr_in);
+#endif
+#if PPSSPP_PLATFORM(PS3)
+		if (pspMsghdr->msg_namelen < 2 || pspSaddr->sa_family != AF_INET) {
+			free(iov);
+			UpdateErrnoFromHost(__KernelGetCurThread(), EINVAL, __FUNCTION__);
+			return hleLogError(Log::sceNet, -1, "invalid IPv4 destination");
+		}
+		saddr.addr.sa_len = sizeof(sockaddr_in);
+		size_t datalen = std::min<size_t>(pspMsghdr->msg_namelen - 2, sizeof(sockaddr_in) - 2);
+#else
+		size_t datalen = std::min(static_cast<size_t>(pspMsghdr->msg_namelen) - (sizeof(pspSaddr->sa_len) + sizeof(pspSaddr->sa_family)), sizeof(saddr.addr.sa_data));
+#endif
 		memcpy(saddr.addr.sa_data, pspSaddr->sa_data, datalen);
 		DEBUG_LOG(Log::sceNet, "SendMsg: Address = %s, Port = %d", ip2str(saddr.in.sin_addr).c_str(), ntohs(saddr.in.sin_port));
 #if defined(_WIN32)
@@ -1009,7 +1048,11 @@ static int sceNetInetSendmsg(int socket, u32 msghdrPtr, int flags) {
 		hdr.namelen = static_cast<int>(datalen + sizeof(saddr.addr.sa_family));
 #else
 		hdr.msg_name = &saddr.addr;
+#if PPSSPP_PLATFORM(PS3)
+		hdr.msg_namelen = sizeof(sockaddr_in);
+#else
 		hdr.msg_namelen = static_cast<int>(datalen + sizeof(saddr.addr.sa_family));
+#endif
 #endif
 	}
 #if defined(_WIN32)
@@ -1064,10 +1107,12 @@ static int sceNetInetSendmsg(int socket, u32 msghdrPtr, int flags) {
 		hdr.msg_controllen = pspMsghdr->msg_controllen;
 		// Note: Many existing implementations of CMSG_FIRSTHDR never look at msg_controllen and just return the value of cmsg_control.
 		if (pspMsghdr->msg_controllen >= sizeof(InetCmsghdr)) {
+#if !PPSSPP_PLATFORM(PS3)
 			for (cmsghdr* cmsgptr = CMSG_FIRSTHDR(&hdr); cmsgptr != NULL; cmsgptr = CMSG_NXTHDR(&hdr, cmsgptr)) {
 				cmsgptr->cmsg_type = convertCMsgTypePSP2Host(cmsgptr->cmsg_type, cmsgptr->cmsg_level);
 				cmsgptr->cmsg_level = convertSockoptLevelPSP2Host(cmsgptr->cmsg_level);
 			}
+#endif
 		}
 #endif
 	}

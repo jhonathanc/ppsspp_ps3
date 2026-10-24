@@ -29,6 +29,7 @@
 #include "Core/Config.h"
 #include "Core/Debugger/MemBlockInfo.h"
 #include "Core/HW/BufferQueue.h"
+#include "Core/HW/SimpleAudioDec.h"
 
 #include "Core/HLE/sceKernel.h"
 #include "Core/HLE/sceUtility.h"
@@ -36,6 +37,7 @@
 #include "Core/HLE/sceKernelMemory.h"
 #include "Core/HLE/sceKernelInterrupt.h"
 #include "Core/HLE/scePower.h"
+#include "Core/HW/SoundDebug.h"
 #include "Core/HLE/sceAtrac.h"
 #include "Core/HLE/sceAudiocodec.h"
 #include "Core/HLE/AtracCtx.h"
@@ -447,6 +449,14 @@ static u32 sceAtracDecodeData(int atracID, u32 outAddr, u32 numSamplesAddr, u32 
 		finishFlagAddr, finish,
 		remainAddr, remains);
 
+	if (outPtr && numSamplesWritten > 0 && SoundDebugOn()) {
+		SoundDebugStats &d = g_soundDebug;
+		const int n = std::min((int)(atrac->GetOutputChannels() * numSamplesWritten), (int)(previous.size() / 2));
+		d.atracDecodes++;
+		d.atracChannels = atrac->GetOutputChannels();
+		SoundDebugScan((const s16_le *)outPtr, n, d.atracPeak, d.atracFull);
+		d.atracSamples += n;
+	}
 	if (outPtr && g_muteFlag[atracID]) {
 		memset(outPtr, 0, atrac->GetOutputChannels() * 2 * numSamplesWritten);
 	}
@@ -659,7 +669,11 @@ static u32 sceAtracGetSecondBufferInfo(int atracID, u32 fileOffsetAddr, u32 desi
 		return hleReportError(Log::Atrac, SCE_KERNEL_ERROR_ILLEGAL_ADDR, "invalid addresses");
 	}
 
-	int result = atrac->GetSecondBufferInfo(fileOffset, desiredSize);
+	u32 nativeOffset = *fileOffset;
+	u32 nativeSize = *desiredSize;
+	int result = atrac->GetSecondBufferInfo(&nativeOffset, &nativeSize);
+	*fileOffset = nativeOffset;
+	*desiredSize = nativeSize;
 	switch (result) {
 	case (int)SCE_ERROR_ATRAC_SECOND_BUFFER_NOT_NEEDED:
 		return hleLogDebug(Log::Atrac, result);
@@ -1179,6 +1193,7 @@ static int sceAtracLowLevelDecode(int atracID, u32 sourceAddr, u32 sourceBytesCo
 	int bytesWritten = 0;
 
 	int retval = atrac->DecodeLowLevel(srcp, &bytesConsumed, outp, &bytesWritten);
+	ConvertAudioSamplesToGuest(outp, bytesWritten / (int)sizeof(s16));
 	*srcConsumed = bytesConsumed;
 	*outWritten = bytesWritten;
 

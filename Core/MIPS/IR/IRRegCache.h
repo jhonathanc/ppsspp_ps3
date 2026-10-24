@@ -159,6 +159,9 @@ protected:
 	};
 
 public:
+	// Set instead of asserting when a mapping would change a static register's lanes (the backend
+	// throws that block's code away; PS3 Frontend 106).
+	bool staticMismatch = false;
 	IRNativeRegCacheBase(MIPSComp::JitOptions *jo);
 	virtual ~IRNativeRegCacheBase() {}
 
@@ -274,6 +277,9 @@ protected:
 		int totalNativeRegs = 0;
 		bool mapFPUSIMD = false;
 		bool mapUseVRegs = false;
+		// Scalar FPRs go in VREGs too (one lane), when the backend keeps all floats in vector
+		// registers (PPC with AltiVec).
+		bool mapFloatsAsVRegs = false;
 	} config_;
 
 	RegStatusNative nr[TOTAL_POSSIBLE_NATIVEREGS];

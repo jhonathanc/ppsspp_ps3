@@ -312,7 +312,7 @@ void PSPThread::GetQuickInfo(char *ptr, int size) {
 		(nt.status & THREADSTATUS_DORMANT) ? "DORMANT" : "",
 		(nt.status & THREADSTATUS_DEAD) ? "DEAD" : "",
 		(int)nt.waitType,
-		nt.waitID,
+		(int)nt.waitID,
 		waitInfo.waitValue);
 }
 
@@ -714,7 +714,7 @@ static void __KernelSleepEndCallback(SceUID threadID, SceUID prevCallbackId) {
 
 	if (thread->nt.wakeupCount > 0) {
 		thread->nt.wakeupCount--;
-		DEBUG_LOG(Log::sceKernel, "sceKernelSleepThreadCB: resume from callback, wakeupCount decremented to %i", thread->nt.wakeupCount);
+		DEBUG_LOG(Log::sceKernel, "sceKernelSleepThreadCB: resume from callback, wakeupCount decremented to %i", (int)thread->nt.wakeupCount);
 		__KernelResumeThreadFromWait(threadID, 0);
 	} else {
 		DEBUG_LOG(Log::sceKernel, "sceKernelSleepThreadCB: Resuming sleep after callback");
@@ -1506,7 +1506,7 @@ void __KernelWaitCurThread(WaitType type, SceUID waitID, u32 waitValue, u32 time
 	PSPThread *thread = __GetCurrentThread();
 	_assert_(thread != nullptr);
 	if ((thread->nt.status & THREADSTATUS_WAIT) != 0)
-		WARN_LOG_REPORT(Log::sceKernel, "Waiting thread for %d that was already waiting for %d", type, thread->nt.waitType);
+		WARN_LOG_REPORT(Log::sceKernel, "Waiting thread for %d that was already waiting for %d", type, (int)thread->nt.waitType);
 	thread->nt.waitID = waitID;
 	thread->nt.waitType = type;
 	thread->hasWaited = true;
@@ -1530,7 +1530,7 @@ void __KernelWaitCallbacksCurThread(WaitType type, SceUID waitID, u32 waitValue,
 
 	PSPThread *thread = __GetCurrentThread();
 	if ((thread->nt.status & THREADSTATUS_WAIT) != 0)
-		WARN_LOG_REPORT(Log::sceKernel, "Waiting thread for %d that was already waiting for %d", type, thread->nt.waitType);
+		WARN_LOG_REPORT(Log::sceKernel, "Waiting thread for %d that was already waiting for %d", type, (int)thread->nt.waitType);
 	thread->nt.waitID = waitID;
 	thread->nt.waitType = type;
 	__KernelChangeThreadState(thread, ThreadStatus(THREADSTATUS_WAIT | (thread->nt.status & THREADSTATUS_SUSPEND)));
@@ -2849,11 +2849,11 @@ int sceKernelWakeupThread(SceUID uid) {
 	if (t) {
 		if (!t->isWaitingFor(WAITTYPE_SLEEP, 0)) {
 			t->nt.wakeupCount++;
-			return hleLogDebug(Log::sceKernel, 0, "wakeupCount incremented to %i", t->nt.wakeupCount);
+			return hleLogDebug(Log::sceKernel, 0, "wakeupCount incremented to %i", (int)t->nt.wakeupCount);
 		} else {
 			__KernelResumeThreadFromWait(uid, 0);
 			hleReSchedule("thread woken up");
-			return hleLogVerbose(Log::sceKernel, 0, "woke thread at %i", t->nt.wakeupCount);
+			return hleLogVerbose(Log::sceKernel, 0, "woke thread at %i", (int)t->nt.wakeupCount);
 		}
 	} else {
 		if (uid == (SceUID)-1) {
@@ -2896,7 +2896,7 @@ static int __KernelSleepThread(bool doCallbacks) {
 		return 0;
 	} else if (thread->nt.wakeupCount > 0) {
 		thread->nt.wakeupCount--;
-		return hleLogDebug(Log::sceKernel, 0, "wakeupCount decremented to %i", thread->nt.wakeupCount);
+		return hleLogDebug(Log::sceKernel, 0, "wakeupCount decremented to %i", (int)thread->nt.wakeupCount);
 	} else {
 		__KernelWaitCurThread(WAITTYPE_SLEEP, 0, 0, 0, doCallbacks, "thread slept");
 		return hleLogVerbose(Log::sceKernel, 0, "sleeping");
@@ -3484,7 +3484,7 @@ void __KernelCallAddress(PSPThread *thread, u32 entryPoint, PSPAction *afterActi
 				if (waitTypeFuncs[thread->nt.waitType].beginFunc != NULL) {
 					waitTypeFuncs[thread->nt.waitType].beginFunc(after->threadID, thread->currentCallbackId);
 				} else {
-					ERROR_LOG_REPORT(Log::HLE, "Missing begin/restore funcs for wait type %d", thread->nt.waitType);
+					ERROR_LOG_REPORT(Log::HLE, "Missing begin/restore funcs for wait type %d", (int)thread->nt.waitType);
 				}
 			}
 
@@ -3646,7 +3646,7 @@ void __KernelReturnFromMipsCall(MIPSState *mips) {
 		if (waitTypeFuncs[cur->nt.waitType].endFunc != NULL)
 			waitTypeFuncs[cur->nt.waitType].endFunc(cur->GetUID(), cur->currentCallbackId);
 		else
-			ERROR_LOG_REPORT(Log::HLE, "Missing begin/restore funcs for wait type %d", cur->nt.waitType);
+			ERROR_LOG_REPORT(Log::HLE, "Missing begin/restore funcs for wait type %d", (int)cur->nt.waitType);
 	}
 
 	// If the wait ended (or there was none), the thread never gave up the CPU, so it shouldn't
@@ -3946,7 +3946,7 @@ std::vector<DebugThreadInfo> GetThreadsInfo() {
 		info.id = uid;
 		strncpy(info.name,t->GetName(),KERNELOBJECT_MAX_NAME_LENGTH);
 		info.name[KERNELOBJECT_MAX_NAME_LENGTH] = 0;
-		info.status = (ThreadStatus)t->nt.status;
+		info.status = (ThreadStatus)(u32)t->nt.status;
 		info.entrypoint = t->nt.entrypoint;
 		info.initialStack = t->nt.initialStack;
 		info.stackSize = (u32)t->nt.stackSize;
@@ -4021,7 +4021,7 @@ bool __KernelInvokeRegisteredExitCallback() {
 
 	PSPThread *thread = kernelObjects.Get<PSPThread>(cb->nc.threadId, error);
 	if (!thread) {
-		WARN_LOG(Log::sceKernel, "__KernelInvokeRegisteredExitCallback: registering thread %08x is gone", cb->nc.threadId);
+		WARN_LOG(Log::sceKernel, "__KernelInvokeRegisteredExitCallback: registering thread %08x is gone", (unsigned int)cb->nc.threadId);
 		return false;
 	}
 	if (thread->isStopped()) {

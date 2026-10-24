@@ -111,7 +111,7 @@ int PSPGamedataInstallDialog::Update(int animSpeed) {
 		param->common.result = SCE_ERROR_UTILITY_GAMEDATA_INVALID_MODE;
 		param.NotifyWrite("DialogResult");
 		ChangeStatus(SCE_UTILITY_STATUS_FINISHED, 0);
-		WARN_LOG_REPORT(Log::sceUtility, "sceUtilityGamedataInstallUpdate: invalid mode %d", param->mode);
+		WARN_LOG_REPORT(Log::sceUtility, "sceUtilityGamedataInstallUpdate: invalid mode %d", (int)param->mode);
 		return 0;
 	}
 

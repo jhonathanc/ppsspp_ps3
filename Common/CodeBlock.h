@@ -15,6 +15,12 @@
 #include <switch.h>
 #endif // PPSSPP_PLATFORM(SWITCH)
 
+#if defined(PPSSPP_PS3_JIT)
+#include <cstring>
+// Returns the PS3 JIT's executable area; sets *size to min(requested, area size).
+u8 *PS3JitCodeArea(size_t *size, size_t requested);
+#endif
+
 // Everything that needs to generate code should inherit from this.
 // You get memory management for free, plus, you can use all emitter functions without
 // having to prefix them with gen-> or something similar.
@@ -83,6 +89,12 @@ public:
 
 		region = (u8 *)jitController.rx_addr;
 		writableRegion = (u8 *)jitController.rw_addr;
+#elif defined(PPSSPP_PS3_JIT)
+		// Code is generated into a plain buffer and copied into an executable area in our
+		// code segment through PS3MAPI (see PS3/jit/PS3JitMemory.h).
+		region = PS3JitCodeArea(&region_size, size);
+		writableRegion = (u8 *)AllocateAlignedMemory(region_size, 128);
+		memset(writableRegion, 0, region_size);
 #else // PPSSPP_PLATFORM(SWITCH)
 		// The protection will be set to RW if PlatformIsWXExclusive.
 		region = (u8 *)AllocateExecutableMemory(region_size);
@@ -155,7 +167,9 @@ public:
 
 	// Call this when shutting down. Don't rely on the destructor, even though it'll do the job.
 	void FreeCodeSpace() {
-#if !PPSSPP_PLATFORM(SWITCH)
+#if defined(PPSSPP_PS3_JIT)
+		FreeAlignedMemory(writableRegion);
+#elif !PPSSPP_PLATFORM(SWITCH)
 		ProtectMemoryPages(region, region_size, MEM_PROT_READ | MEM_PROT_WRITE);
 		FreeExecutableMemory(region, region_size);
 #else // !PPSSPP_PLATFORM(SWITCH)

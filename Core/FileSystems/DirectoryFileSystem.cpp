@@ -56,7 +56,7 @@
 #include <sys/types.h>
 #include <sys/vfs.h>
 #define statvfs statfs
-#else
+#elif !PPSSPP_PLATFORM(PS3)
 #include <sys/statvfs.h>
 #endif
 #include <ctype.h>

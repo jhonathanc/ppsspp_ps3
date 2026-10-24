@@ -1,5 +1,7 @@
 #pragma once
 
+#include <vector>
+
 #include "Common/CommonTypes.h"
 #include "Core/MIPS/JitCommon/JitCommon.h"
 #include "Core/MIPS/JitCommon/JitState.h"
@@ -11,6 +13,8 @@ struct AddressSpace;
 }
 
 namespace MIPSComp {
+
+extern bool g_irRoundingModeUsed;
 
 class IRFrontend : public MIPSFrontendInterface {
 public:
@@ -98,8 +102,9 @@ public:
 	bool DoState(PointerWrap &p);
 	bool UpdateFCR31(u32 fcr31);  // returns true if the block cache needs clearing
 	bool CheckRounding(u32 blockAddress);  // returns true if we need a do-over
-
-	void DoJit(u32 em_address, std::vector<IRInst> &instructions, u32 &mipsBytes);
+	// optimize = false: the IR straight from the MIPS code, without the optimization passes (the PS3
+	// JIT interprets new blocks a few times first, and only optimizes the ones it compiles).
+	void DoJit(u32 em_address, std::vector<IRInst> &instructions, u32 &mipsBytes, bool optimize = true);
 
 	void EatPrefix() override {
 		js.EatPrefix();

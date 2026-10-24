@@ -101,6 +101,7 @@ public:
 	virtual void InvalidateBlock(int block_num) = 0;
 	// Links the block's exits, and other blocks' exits to it.
 	void FinalizeBlock(int block_num, const JitOptions &jo);
+	virtual void FinalizeBlockDone() {}
 
 	virtual void UpdateFCR31(MIPSState *mipsState) {}
 

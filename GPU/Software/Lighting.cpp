@@ -393,4 +393,8 @@ void Process(VertexData &vertex, Vec4F32 modelpos, Vec4F32 worldnormal, float no
 	ProcessSIMD<false>(vertex, modelpos, worldnormal, normalRsqrt, state);
 }
 
+#if defined(PPSSPP_PS3_RSX)
+#include "PS3/rsx/SoftwareLighting.inl"
+#endif
+
 } // namespace

@@ -17,10 +17,13 @@
 
 #pragma once
 
+#include "ppsspp_config.h"
+#include <cstddef>
+
 #ifndef _WIN32
-#ifndef __SWITCH__
+#if !defined(__SWITCH__) && !PPSSPP_PLATFORM(PS3)
 #include <sys/mman.h>
-#else
+#elif defined(__SWITCH__)
 #include <switch.h>
 #endif // !__SWITCH__
 #endif

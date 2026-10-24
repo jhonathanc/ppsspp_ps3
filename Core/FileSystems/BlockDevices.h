@@ -27,6 +27,7 @@
 #include <memory>
 
 #include "Common/CommonTypes.h"
+#include "Common/Swap.h"
 
 #include "ext/libkirk/kirk_engine.h"
 
@@ -153,12 +154,13 @@ private:
 
 // For encrypted ISOs in PBP files.
 
+// Read straight from the PBP, so the fields are little-endian on every host.
 struct table_info {
 	u8 mac[16];
-	u32 offset;
-	int size;
-	int flag;
-	int unk_1c;
+	u32_le offset;
+	s32_le size;
+	s32_le flag;
+	s32_le unk_1c;
 };
 
 class NPDRMDemoBlockDevice : public BlockDevice {

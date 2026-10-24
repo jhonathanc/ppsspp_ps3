@@ -325,7 +325,7 @@ int IsSocketReady(int fd, bool readfd, bool writefd, int* errorcode, int timeout
 			*errorcode = EBADF;
 		return SOCKET_ERROR;
 	}
-#if !defined(_WIN32)
+#if !defined(_WIN32) && !PPSSPP_PLATFORM(PS3)
 	if (fd >= FD_SETSIZE) {
 		if (errorcode != nullptr)
 			*errorcode = EBADF;
@@ -355,7 +355,12 @@ int IsSocketReady(int fd, bool readfd, bool writefd, int* errorcode, int timeout
 void changeBlockingMode(int fd, int nonblocking) {
 	unsigned long on = 1;
 	unsigned long off = 0;
-#if defined(_WIN32)
+#if PPSSPP_PLATFORM(PS3)
+	int value = nonblocking ? 1 : 0;
+	if (setsockopt(fd, SOL_SOCKET, SO_NBIO, &value, sizeof(value)) < 0) {
+		ERROR_LOG(Log::sceNet, "SO_NBIO failed: %d", socket_errno);
+	}
+#elif defined(_WIN32)
 	if (nonblocking) {
 		// Change to Non-Blocking Mode
 		ioctlsocket(fd, FIONBIO, &on);
@@ -1098,7 +1103,7 @@ void handleTimeout(SceNetAdhocMatchingContext * context)
 				// FIXME: TIMEOUT event should only be triggered on Parent/P2P mode and for Parent/P2P peer?
 				spawnLocalEvent(context, PSP_ADHOC_MATCHING_EVENT_TIMEOUT, &peer->mac, 0, NULL);
 
-				INFO_LOG(Log::sceNet, "TimedOut Member Peer %s (%lld - %lld = %lld > %lld us)", mac2str(&peer->mac).c_str(), now, peer->lastping, (now - peer->lastping), context->timeout);
+				INFO_LOG(Log::sceNet, "TimedOut Member Peer %s (%lld - %lld = %lld > %lld us)", mac2str(&peer->mac).c_str(), (long long int)now, (long long int)peer->lastping, (now - peer->lastping), (long long int)context->timeout);
 
 				if (context->mode == PSP_ADHOC_MATCHING_MODE_PARENT) 
 					sendDeathMessage(context, peer);
@@ -2034,6 +2039,9 @@ uint16_t getLocalPort(int sock) {
 }
 
 u_long getAvailToRecv(int sock, int udpBufferSize) {
+#if defined(__PSL1GHT__)
+	return PS3SocketReceiveQueue(sock);
+#else
 	u_long n = 0; // Typical MTU size is 1500
 	int err = -1;
 	// Note: FIONREAD may have different behavior depends on the platform, according to https://stackoverflow.com/questions/9278189/how-do-i-get-amount-of-queued-data-for-udp-socket/9296481#9296481
@@ -2050,6 +2058,7 @@ u_long getAvailToRecv(int sock, int udpBufferSize) {
 		// TODO: Cap number of bytes of full DGRAM message(s) up to buffer size, but may cause Warriors Orochi 2 to get FPS drops
 	}
 	return n;
+#endif
 }
 
 int getSockMaxSize(int udpsock) {
@@ -2078,8 +2087,13 @@ int setSockBufferSize(int sock, int opt, int size) { // opt = SO_RCVBUF/SO_SNDBU
 }
 
 int setSockMSS(int sock, int size) {
+#if PPSSPP_PLATFORM(PS3)
+	errno = EOPNOTSUPP;
+	return -1;
+#else
 	int mss = size; // 1460;
 	return setsockopt(sock, IPPROTO_TCP, TCP_MAXSEG, (char*)&mss, sizeof(mss));
+#endif
 }
 
 int setSockTimeout(int sock, int opt, unsigned long timeout_usec) { // opt = SO_SNDTIMEO/SO_RCVTIMEO
@@ -2107,14 +2121,23 @@ int getSockError(int sock) {
 }
 
 int getSockNoDelay(int tcpsock) { 
+#if PPSSPP_PLATFORM(PS3)
+	errno = EOPNOTSUPP;
+	return -1;
+#else
 	int opt = 0;
 	socklen_t optlen = sizeof(opt);
 	getsockopt(tcpsock, IPPROTO_TCP, TCP_NODELAY, (char*)&opt, &optlen);
 	return opt;
+#endif
 }
 
 //#define TCP_QUICKACK     0x0c
 int setSockNoDelay(int tcpsock, int flag) {
+#if PPSSPP_PLATFORM(PS3)
+	errno = EOPNOTSUPP;
+	return -1;
+#else
 	int opt = flag;
 	// Disable ACK Delay when supported
 #if defined(TCP_QUICKACK)
@@ -2129,6 +2152,7 @@ int setSockNoDelay(int tcpsock, int flag) {
 #endif
 	// Disable Nagle Algo
 	return setsockopt(tcpsock, IPPROTO_TCP, TCP_NODELAY, (char*)&opt, sizeof(opt));
+#endif
 }
 
 int setSockNoSIGPIPE(int sock, int flag) {
@@ -2164,7 +2188,7 @@ int setUDPConnReset(int udpsock, bool enabled) {
 	return -1;
 }
 
-#if !defined(TCP_KEEPIDLE) && !PPSSPP_PLATFORM(SWITCH)
+#if !defined(TCP_KEEPIDLE) && !PPSSPP_PLATFORM(SWITCH) && !PPSSPP_PLATFORM(PS3)
 #define TCP_KEEPIDLE	TCP_KEEPALIVE //TCP_KEEPIDLE on Linux is equivalent to TCP_KEEPALIVE on macOS
 #endif
 // VS 2017 compatibility
@@ -2180,7 +2204,7 @@ int setSockKeepAlive(int sock, bool keepalive, const int keepinvl, const int kee
 	int optval = keepalive ? 1 : 0;
 	int optlen = sizeof(optval);
 	int result = setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, (char*)&optval, optlen);
-#if !PPSSPP_PLATFORM(SWITCH) && !PPSSPP_PLATFORM(OPENBSD)
+#if !PPSSPP_PLATFORM(SWITCH) && !PPSSPP_PLATFORM(OPENBSD) && !PPSSPP_PLATFORM(PS3)
 	if (result == 0 && keepalive) {
 		if (getsockopt(sock, SOL_SOCKET, SO_TYPE, (char*)&optval, (socklen_t*)&optlen) == 0 && optval == SOCK_STREAM) {
 			optlen = sizeof(optval);

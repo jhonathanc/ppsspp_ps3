@@ -22,7 +22,10 @@
 #include <set>
 #include <vector>
 #include <mutex>
+#include <new>
 #include <zstd.h>
+
+#include "ext/xxhash.h"
 
 #include "Common/CommonTypes.h"
 #include "Common/File/FileUtil.h"
@@ -30,6 +33,7 @@
 #include "Common/Thread/ParallelLoop.h"
 #include "Common/Log.h"
 #include "Common/StringUtils.h"
+#include "Common/TimeUtil.h"
 #include "Common/System/System.h"
 
 #include "Core/Compatibility.h"
@@ -51,11 +55,110 @@ namespace GPURecord {
 
 // Appends data (or zeroes, for a null p) at a 4-byte aligned offset, zero padded: players read register blocks and headers as
 // words, which a PSP can't do unaligned.
-static u32 AppendToPushbuf(std::vector<u8> &pushbuf, const void *p, u32 sz) {
+size_t g_dumpByteLimit = 0;
+void (*g_dumpDroppedHook)(u32 bytes) = nullptr;
+double g_dumpTimeLimit = 0.0;
+bool g_dumpRecordReplays = false;
+void (*g_dumpAbandonedHook)(double seconds, u32 bytes) = nullptr;
+
+void ChunkedBuffer::resize(u32 n) {
+	const u32 oldSize = size_;
+	const size_t need = (n + CHUNK - 1) / CHUNK;
+	if (failed_ || (limit_ && need * CHUNK > limit_)) {
+		failed_ = true;
+		return;
+	}
+	while (chunks_.size() < need) {
+		u8 *piece = new (std::nothrow) u8[CHUNK];
+		if (!piece) {
+			failed_ = true;
+			return;
+		}
+		chunks_.emplace_back(piece);
+		memset(piece, 0, CHUNK);
+	}
+	while (chunks_.size() > need)
+		chunks_.pop_back();
+	size_ = n;
+	// Bytes past the old end within its last piece may be stale after a shrink: zero them.
+	if (n > oldSize && oldSize % CHUNK != 0) {
+		const u32 end = std::min(n, (oldSize / CHUNK + 1) * CHUNK);
+		memset(chunks_[oldSize / CHUNK].get() + oldSize % CHUNK, 0, end - oldSize);
+	}
+}
+
+const u8 *ChunkedBuffer::span(u32 off, u32 *len) const {
+	*len = std::min(CHUNK - off % CHUNK, size_ - off);
+	return chunks_[off / CHUNK].get() + off % CHUNK;
+}
+
+u8 *ChunkedBuffer::span(u32 off, u32 *len) {
+	*len = std::min(CHUNK - off % CHUNK, size_ - off);
+	return chunks_[off / CHUNK].get() + off % CHUNK;
+}
+
+void ChunkedBuffer::write(u32 off, const void *p, u32 n) {
+	if (off >= size_)
+		return;
+	n = std::min(n, size_ - off);
+	const u8 *src = (const u8 *)p;
+	while (n) {
+		u32 len;
+		u8 *d = span(off, &len);
+		len = std::min(len, n);
+		memcpy(d, src, len);
+		off += len; src += len; n -= len;
+	}
+}
+
+void ChunkedBuffer::fill(u32 off, u8 c, u32 n) {
+	if (off >= size_)
+		return;
+	n = std::min(n, size_ - off);
+	while (n) {
+		u32 len;
+		u8 *d = span(off, &len);
+		len = std::min(len, n);
+		memset(d, c, len);
+		off += len; n -= len;
+	}
+}
+
+void ChunkedBuffer::read(u32 off, void *p, u32 n) const {
+	if (off >= size_)
+		return;
+	n = std::min(n, size_ - off);
+	u8 *dst = (u8 *)p;
+	while (n) {
+		u32 len;
+		const u8 *s = span(off, &len);
+		len = std::min(len, n);
+		memcpy(dst, s, len);
+		off += len; dst += len; n -= len;
+	}
+}
+
+int ChunkedBuffer::compare(u32 off, const void *p, u32 n) const {
+	if (off + (u64)n > size_)
+		return 1;
+	const u8 *src = (const u8 *)p;
+	while (n) {
+		u32 len;
+		const u8 *s = span(off, &len);
+		len = std::min(len, n);
+		const int r = memcmp(s, src, len);
+		if (r != 0)
+			return r;
+		off += len; src += len; n -= len;
+	}
+	return 0;
+}
+
+static u32 AppendToPushbuf(ChunkedBuffer &pushbuf, const void *p, u32 sz) {
 	const u32 ptr = ((u32)pushbuf.size() + 3) & ~3;
-	pushbuf.resize(ptr + sz, 0);
+	pushbuf.resize(ptr + sz);
 	if (p && sz)
-		memcpy(pushbuf.data() + ptr, p, sz);
+		pushbuf.write(ptr, p, sz);
 	return ptr;
 }
 
@@ -154,7 +257,7 @@ void Recorder::DirtyDrawnVRAM() {
 bool Recorder::BeginRecording() {
 	std::unique_lock<std::mutex> guard(callbackLock_);
 	nextFrame = false;
-	if (PSP_CoreParameter().fileType == IdentifiedFileType::PPSSPP_GE_DUMP) {
+	if (PSP_CoreParameter().fileType == IdentifiedFileType::PPSSPP_GE_DUMP && !g_dumpRecordReplays) {
 		// Can't record a GE dump. RecordNextFrame refuses this too.
 		writeCallback = nullptr;
 		return false;
@@ -162,18 +265,24 @@ bool Recorder::BeginRecording() {
 
 	active = true;
 	guard.unlock();
+	recordStart_ = time_now_d();
+	commandsSinceCheck_ = 0;
 	lastTextures.clear();
 	lastRenderTargets.clear();
 	readbackAddrs.clear();
 	targetWrites_.clear();
 	writeCount_ = 0;
 	waitForDisplayCopy_ = false;
+	emitted_.clear();
 	flipLastAction = gpuStats.totals.numFlips;
 	flipFinishAt = -1;
+	pushbuf.clear();
+	pushbuf.setLimit(g_dumpByteLimit);
 
 	u32 sz = 512 * 4;
-	u32 ptr = AppendToPushbuf(pushbuf, nullptr, sz);
-	gstate.Save((u32_le *)(pushbuf.data() + ptr));
+	std::unique_ptr<u32_le[]> state(new u32_le[512]);
+	gstate.Save(state.get());
+	u32 ptr = AppendToPushbuf(pushbuf, state.get(), sz);
 	commands.push_back({ CommandType::INIT, sz, ptr });
 	lastVRAM.resize(2 * 1024 * 1024);
 
@@ -190,20 +299,44 @@ bool Recorder::BeginRecording() {
 	return true;
 }
 
-static void WriteCompressed(FILE *fp, const void *p, size_t sz) {
-	size_t compressed_size = ZSTD_compressBound(sz);
-	u8 *compressed = new u8[compressed_size];
-	compressed_size = ZSTD_compress(compressed, compressed_size, p, sz, 6);
-
-	u32 write_size = (u32)compressed_size;
+// Compressed as one zstd frame per 64 KB piece, one after another (ZSTD_decompress takes a run of
+// frames, so players read it as before): no buffer the size of the whole dump is needed.
+template <typename GetPiece>
+static void WriteCompressedPieces(FILE *fp, size_t total, GetPiece getPiece) {
+	const int64_t sizePos = File::Ftell(fp);
+	u32_le write_size = 0;
 	fwrite(&write_size, sizeof(write_size), 1, fp);
-	fwrite(compressed, compressed_size, 1, fp);
-
-	delete[] compressed;
+	ZSTD_CCtx *cctx = ZSTD_createCCtx();
+	const size_t bound = ZSTD_compressBound(ChunkedBuffer::CHUNK);
+	std::unique_ptr<u8[]> compressed(new u8[bound]);
+	std::unique_ptr<u8[]> piece(new u8[ChunkedBuffer::CHUNK]);
+	size_t written = 0;
+	for (size_t off = 0; off < total; off += ChunkedBuffer::CHUNK) {
+		const size_t n = std::min<size_t>(ChunkedBuffer::CHUNK, total - off);
+		getPiece(off, piece.get(), n);
+		size_t c = ZSTD_compressCCtx(cctx, compressed.get(), bound, piece.get(), n, 3);
+		if (ZSTD_isError(c))
+			break;
+		fwrite(compressed.get(), c, 1, fp);
+		written += c;
+	}
+	ZSTD_freeCCtx(cctx);
+	const int64_t endPos = File::Ftell(fp);
+	write_size = (u32)written;
+	File::Fseek(fp, sizePos, SEEK_SET);
+	fwrite(&write_size, sizeof(write_size), 1, fp);
+	File::Fseek(fp, endPos, SEEK_SET);
 }
 
 Path Recorder::WriteRecording() {
 	FlushRegisters();
+
+	if (pushbuf.failed() || lastVRAM.failed()) {
+		ERROR_LOG(Log::G3D, "GE dump dropped: it needed more memory than was free (%u bytes recorded)", pushbuf.size());
+		if (g_dumpDroppedHook)
+			g_dumpDroppedHook(pushbuf.size());
+		return Path();
+	}
 
 	const Path filename = GenRecordingFilename();
 
@@ -223,13 +356,24 @@ Path Recorder::WriteRecording() {
 	strncpy(header.gameID, gameID.c_str(), sizeof(header.gameID));
 	fwrite(&header, sizeof(header), 1, fp);
 
-	u32 sz = (u32)commands.size();
+	u32_le sz = (u32)commands.size();
 	fwrite(&sz, sizeof(sz), 1, fp);
-	u32 bufsz = (u32)pushbuf.size();
+	u32_le bufsz = (u32)pushbuf.size();
 	fwrite(&bufsz, sizeof(bufsz), 1, fp);
 
-	WriteCompressed(fp, commands.data(), commands.size() * sizeof(Command));
-	WriteCompressed(fp, pushbuf.data(), bufsz);
+	WriteCompressedPieces(fp, commands.size() * sizeof(Command), [&](size_t off, u8 *dst, size_t n) {
+		size_t done = 0;
+		while (done < n) {
+			const size_t b = off + done;
+			const size_t idx = b / sizeof(Command), within = b % sizeof(Command);
+			const size_t len = std::min(sizeof(Command) - within, n - done);
+			memcpy(dst + done, (const u8 *)&commands[idx] + within, len);
+			done += len;
+		}
+	});
+	WriteCompressedPieces(fp, bufsz, [&](size_t off, u8 *dst, size_t n) {
+		pushbuf.read((u32)off, dst, (u32)n);
+	});
 
 	fclose(fp);
 
@@ -260,55 +404,6 @@ static void GetVertDataSizes(int vcount, const void *indices, u32 &vbytes, u32 &
 	}
 }
 
-static const u8 *mymemmem(const u8 *haystack, size_t off, size_t hlen, const u8 *needle, size_t nlen, uintptr_t align) {
-	if (!nlen) {
-		return nullptr;
-	}
-
-	const u8 *last_possible = haystack + hlen - nlen;
-	const u8 *first_possible = haystack + off;
-	int first = *needle;
-
-	const u8 *result = nullptr;
-	std::mutex resultLock;
-
-	int range = (int)(last_possible - first_possible);
-	ParallelRangeLoop(&g_threadManager, [&](int l, int h) {
-		const u8 *p = haystack + off + l;
-		const u8 *pend = haystack + off + h;
-
-		const uintptr_t align_mask = align - 1;
-		auto poffset = [&]() {
-			return ((uintptr_t)(p - haystack) & align_mask);
-		};
-		auto alignp = [&]() {
-			uintptr_t offset = poffset();
-			if (offset != 0)
-				p += align - offset;
-		};
-
-		alignp();
-		while (p <= pend) {
-			p = (const u8 *)memchr(p, first, pend - p + 1);
-			if (!p) {
-				return;
-			}
-			if (poffset() == 0 && !memcmp(p, needle, nlen)) {
-				std::lock_guard<std::mutex> guard(resultLock);
-				// Take the lowest result so we get the same file for any # of threads.
-				if (!result || p < result)
-					result = p;
-				return;
-			}
-
-			p++;
-			alignp();
-		}
-	}, 0, range, 128 * 1024, 8, TaskPriority::LOW);
-
-	return result;
-}
-
 Command Recorder::EmitCommandWithRAM(CommandType t, const void *p, u32 sz, u32 align) {
 	FlushRegisters();
 
@@ -316,20 +411,21 @@ Command Recorder::EmitCommandWithRAM(CommandType t, const void *p, u32 sz, u32 a
 	align = std::max(align, 4U);
 
 	if (sz) {
-		// If at all possible, try to find it already in the buffer.
-		const u8 *prev = nullptr;
-		const size_t NEAR_WINDOW = std::max((int)sz * 2, 1024 * 10);
-		// Let's try nearby first... it will often be nearby.
-		if (pushbuf.size() > NEAR_WINDOW) {
-			prev = mymemmem(pushbuf.data(), pushbuf.size() - NEAR_WINDOW, pushbuf.size(), (const u8 *)p, sz, align);
-		}
-		if (!prev) {
-			prev = mymemmem(pushbuf.data(), 0, pushbuf.size(), (const u8 *)p, sz, align);
+		// The same data emitted before (vertices, indices, palettes, textures used again) is
+		// found by its hash and size and points there. This used to search the whole buffer
+		// for it with memchr/memcmp at every emission: one frame of Midnight Club, ~3800
+		// emissions over up to 7.7 MB, was ~15 GB of searching - 20+ s on the PS3 (build 262:
+		// dumps given up). Data only found inside a bigger earlier emission is now stored again.
+		bool found = false;
+		const uint64_t key = XXH3_64bits_withSeed(p, sz, sz);
+		auto it = emitted_.find(key);
+		if (it != emitted_.end() && (it->second & (align - 1)) == 0 && it->second + sz <= pushbuf.size() &&
+			pushbuf.compare(it->second, p, sz) == 0) {
+			cmd.ptr = it->second;
+			found = true;
 		}
 
-		if (prev) {
-			cmd.ptr = (u32)(prev - pushbuf.data());
-		} else {
+		if (!found) {
 			cmd.ptr = (u32)pushbuf.size();
 			int pad = 0;
 			if (cmd.ptr & (align - 1)) {
@@ -338,9 +434,11 @@ Command Recorder::EmitCommandWithRAM(CommandType t, const void *p, u32 sz, u32 a
 			}
 			pushbuf.resize(pushbuf.size() + sz + pad);
 			if (pad) {
-				memset(pushbuf.data() + cmd.ptr - pad, 0, pad);
+				pushbuf.fill(cmd.ptr - pad, 0, pad);
 			}
-			memcpy(pushbuf.data() + cmd.ptr, p, sz);
+			pushbuf.write(cmd.ptr, p, sz);
+			if (!pushbuf.failed())
+				emitted_[key] = cmd.ptr;
 		}
 	}
 
@@ -352,34 +450,34 @@ Command Recorder::EmitCommandWithRAM(CommandType t, const void *p, u32 sz, u32 a
 void Recorder::UpdateLastVRAM(u32 addr, u32 bytes) {
 	u32 base = addr & 0x001FFFFF;
 	if (base + bytes > 0x00200000) {
-		memcpy(&lastVRAM[base], Memory::GetPointerUnchecked(0x04000000 | base), 0x00200000 - base);
+		lastVRAM.write(base, Memory::GetPointerUnchecked(0x04000000 | base), 0x00200000 - base);
 		bytes = base + bytes - 0x00200000;
 		base = 0;
 	}
-	memcpy(&lastVRAM[base], Memory::GetPointerUnchecked(0x04000000 | base), bytes);
+	lastVRAM.write(base, Memory::GetPointerUnchecked(0x04000000 | base), bytes);
 }
 
 void Recorder::ClearLastVRAM(u32 addr, u8 c, u32 bytes) {
 	u32 base = addr & 0x001FFFFF;
 	if (base + bytes > 0x00200000) {
-		memset(&lastVRAM[base], c, 0x00200000 - base);
+		lastVRAM.fill(base, c, 0x00200000 - base);
 		bytes = base + bytes - 0x00200000;
 		base = 0;
 	}
-	memset(&lastVRAM[base], c, bytes);
+	lastVRAM.fill(base, c, bytes);
 }
 
 int Recorder::CompareLastVRAM(u32 addr, u32 bytes) const {
 	u32 base = addr & 0x001FFFFF;
 	if (base + bytes > 0x00200000) {
-		int result = memcmp(&lastVRAM[base], Memory::GetPointerUnchecked(0x04000000 | base), 0x00200000 - base);
+		int result = lastVRAM.compare(base, Memory::GetPointerUnchecked(0x04000000 | base), 0x00200000 - base);
 		if (result != 0)
 			return result;
 
 		bytes = base + bytes - 0x00200000;
 		base = 0;
 	}
-	return memcmp(&lastVRAM[base], Memory::GetPointerUnchecked(0x04000000 | base), bytes);
+	return lastVRAM.compare(base, Memory::GetPointerUnchecked(0x04000000 | base), bytes);
 }
 
 u32 Recorder::GetTargetFlags(u32 addr, u32 sizeInRAM) {
@@ -460,56 +558,76 @@ void Recorder::EmitTextureData(int level, u32 texaddr) {
 	int bufw = GetTextureBufw(level, texaddr, format);
 	int extraw = w > bufw ? w - bufw : 0;
 	u32 sizeInRAM = (textureBitsPerPixel[format] * (bufw * h + extraw)) / 8;
+	if (extraw && gstate.isTextureSwizzled() && bufw > 0) {
+		// Swizzled, the columns past the buffer width are whole blocks (16 bytes by 8 rows) after
+		// each block row, so the last block row reaches further than one extra row's worth.
+		const u32 bitsPP = textureBitsPerPixel[format];
+		const u32 blocksPerRow = std::max<u32>(1, (u32)bufw * bitsPP / 128);
+		const u32 lastBlock = (u32)((h - 1) / 8) * blocksPerRow + ((u32)w * bitsPP / 8 - 1) / 16;
+		sizeInRAM = std::max(sizeInRAM, (lastBlock + 1) * 128);
+	}
 
 	CommandType type = CommandType((int)CommandType::TEXTURE0 + level);
 	const u8 *p = Memory::GetPointerUnchecked(texaddr);
 	u32 bytes = Memory::ClampValidSizeAt(texaddr, sizeInRAM);
-	std::vector<u8> framebufData;
+	struct FramebufData {
+		u32_le addr;
+		s32_le bufw;
+		u32_le flags;
+		u32_le pad;
+	};
+	// A framebuffer is stored as this header followed by its pixels (no copy of the two together:
+	// pieces of a MB in one block aren't always there on the PS3).
+	FramebufData framebuf{};
+	u32 headerBytes = 0;
 
 	if (Memory::IsVRAMAddress(texaddr)) {
 		ReadbackUndrawnVRAM(texaddr, bytes);
 
-		struct FramebufData {
-			u32 addr;
-			int bufw;
-			u32 flags;
-			u32 pad;
-		};
-
 		u32 flags = GetTargetFlags(texaddr, bytes);
-		FramebufData framebuf{ texaddr, bufw, flags };
-		framebufData.resize(sizeof(framebuf) + bytes);
-		memcpy(&framebufData[0], &framebuf, sizeof(framebuf));
-		memcpy(&framebufData[sizeof(framebuf)], p, bytes);
-		p = &framebufData[0];
+		framebuf.addr = texaddr;
+		framebuf.bufw = bufw;
+		framebuf.flags = flags;
+		headerBytes = (u32)sizeof(framebuf);
 
 		if ((flags & 2) == 0)
 			UpdateLastVRAM(texaddr, bytes);
 
 		// Okay, now we'll just emit this instead.
 		type = CommandType((int)CommandType::FRAMEBUF0 + level);
-		bytes += (u32)sizeof(framebuf);
 	}
 
 	if (bytes > 0) {
 		FlushRegisters();
+		const u32 total = headerBytes + bytes;
 
 		// Dumps are huge - let's try to find this already emitted.
 		for (u32 prevptr : lastTextures) {
-			if (pushbuf.size() < prevptr + bytes) {
+			if (pushbuf.size() < prevptr + total) {
 				continue;
 			}
 
-			if (memcmp(pushbuf.data() + prevptr, p, bytes) == 0) {
-				commands.push_back({ type, bytes, prevptr });
+			if ((headerBytes == 0 || pushbuf.compare(prevptr, &framebuf, headerBytes) == 0) && pushbuf.compare(prevptr + headerBytes, p, bytes) == 0) {
+				commands.push_back({ type, total, prevptr });
 				// Okay, that was easy.  Bail out.
 				return;
 			}
 		}
 
 		// Not there, gotta emit anew.
-		Command cmd = EmitCommandWithRAM(type, p, bytes, 16);
-		lastTextures.push_back(cmd.ptr);
+		if (headerBytes == 0) {
+			Command cmd = EmitCommandWithRAM(type, p, bytes, 16);
+			lastTextures.push_back(cmd.ptr);
+		} else {
+			u32 ptr = pushbuf.size();
+			const u32 pad = (16 - (ptr & 15)) & 15;
+			ptr += pad;
+			pushbuf.resize(ptr + total);
+			pushbuf.write(ptr, &framebuf, headerBytes);
+			pushbuf.write(ptr + headerBytes, p, bytes);
+			commands.push_back({ type, total, ptr });
+			lastTextures.push_back(ptr);
+		}
 	}
 }
 
@@ -614,11 +732,13 @@ void Recorder::EmitClut(u32 op) {
 			ReadbackUndrawnVRAM(addr, bytes);
 
 			struct ClutAddrData {
-				u32 addr;
-				u32 flags;
+				u32_le addr;
+				u32_le flags;
 			};
 			u32 flags = GetTargetFlags(addr, bytes);
-			ClutAddrData data{ addr, flags };
+			ClutAddrData data{};
+			data.addr = addr;
+			data.flags = flags;
 
 			FlushRegisters();
 			Command cmd{ CommandType::CLUTADDR, sizeof(data), AppendToPushbuf(pushbuf, &data, sizeof(data)) };
@@ -693,7 +813,7 @@ void Recorder::EmitBezierSpline(u32 op) {
 }
 
 bool Recorder::RecordNextFrame(const std::function<void(const Path &)> callback) {
-	if (PSP_CoreParameter().fileType == IdentifiedFileType::PPSSPP_GE_DUMP) {
+	if (PSP_CoreParameter().fileType == IdentifiedFileType::PPSSPP_GE_DUMP && !g_dumpRecordReplays) {
 		return false;
 	}
 	std::lock_guard<std::mutex> guard(callbackLock_);
@@ -734,6 +854,7 @@ void Recorder::FinishRecording() {
 	commands.clear();
 	pushbuf.clear();
 	lastVRAM.clear();
+	emitted_.clear();
 
 	NOTICE_LOG(Log::System, "Recording finished");
 	flipLastAction = gpuStats.totals.numFlips;
@@ -763,13 +884,45 @@ void Recorder::CheckEdramTrans() {
 	lastEdramTrans = value;
 
 	FlushRegisters();
-	Command cmd{ CommandType::EDRAMTRANS, sizeof(value), AppendToPushbuf(pushbuf, &value, sizeof(value)) };
+	const u32_le valueLE = value;
+	Command cmd{ CommandType::EDRAMTRANS, sizeof(valueLE), AppendToPushbuf(pushbuf, &valueLE, sizeof(valueLE)) };
 	commands.push_back(cmd);
+}
+
+// Gives up the recording in progress: nothing is written, its memory is freed, the game goes on.
+void Recorder::AbandonRecording(double seconds) {
+	const u32 bytes = (u32)pushbuf.size();
+	{
+		std::lock_guard<std::mutex> guard(callbackLock_);
+		active = false;
+		nextFrame = false;
+		writeCallback = nullptr;
+	}
+	commands.clear();
+	pushbuf.clear();
+	lastVRAM.clear();
+	lastRegisters.clear();
+	lastTextures.clear();
+	lastRenderTargets.clear();
+	emitted_.clear();
+	flipLastAction = gpuStats.totals.numFlips;
+	flipFinishAt = -1;
+	ERROR_LOG(Log::G3D, "GE dump given up: the frame took over %.0f s to record (%u bytes recorded)", seconds, bytes);
+	if (g_dumpAbandonedHook)
+		g_dumpAbandonedHook(seconds, bytes);
 }
 
 void Recorder::NotifyCommand(u32 pc) {
 	if (!active) {
 		return;
+	}
+	if (g_dumpTimeLimit > 0.0 && ++commandsSinceCheck_ >= 32) {
+		commandsSinceCheck_ = 0;
+		const double seconds = time_now_d() - recordStart_;
+		if (seconds > g_dumpTimeLimit) {
+			AbandonRecording(seconds);
+			return;
+		}
 	}
 
 	if (!Memory::IsValid4AlignedAddress(pc)) {
@@ -834,7 +987,8 @@ void Recorder::NotifyMemcpy(u32 dest, u32 src, u32 sz) {
 	CheckEdramTrans();
 	if (Memory::IsVRAMAddress(dest)) {
 		FlushRegisters();
-		Command cmd{ CommandType::MEMCPYDEST, sizeof(dest), AppendToPushbuf(pushbuf, &dest, sizeof(dest)) };
+		const u32_le destLE = dest;
+		Command cmd{ CommandType::MEMCPYDEST, sizeof(destLE), AppendToPushbuf(pushbuf, &destLE, sizeof(destLE)) };
 		commands.push_back(cmd);
 
 		sz = Memory::ClampValidSizeAt(dest, sz);
@@ -853,14 +1007,17 @@ void Recorder::NotifyMemset(u32 dest, int v, u32 sz) {
 
 	CheckEdramTrans();
 	struct MemsetCommand {
-		u32 dest;
-		int value;
-		u32 sz;
+		u32_le dest;
+		s32_le value;
+		u32_le sz;
 	};
 
 	if (Memory::IsVRAMAddress(dest)) {
 		sz = Memory::ClampValidSizeAt(dest, sz);
-		MemsetCommand data{ dest, v, sz };
+		MemsetCommand data{};
+		data.dest = dest;
+		data.value = v;
+		data.sz = sz;
 
 		FlushRegisters();
 		Command cmd{ CommandType::MEMSET, sizeof(data), AppendToPushbuf(pushbuf, &data, sizeof(data)) };
@@ -883,6 +1040,13 @@ bool Recorder::HasDrawCommands() const {
 		switch (cmd.type) {
 		case CommandType::INIT:
 		case CommandType::DISPLAY:
+		// Not drawing: the palette saved at the start (counted as drawing, a dump ended at the
+		// next display change with nothing drawn - Midnight Club, build 262), palette loads,
+		// address translation and register changes.
+		case CommandType::CLUT:
+		case CommandType::CLUTADDR:
+		case CommandType::EDRAMTRANS:
+		case CommandType::REGISTERS:
 			continue;
 
 		default:
@@ -930,10 +1094,13 @@ void Recorder::PushDisplay(u32 framebuf, int stride, int fmt) {
 	CheckEdramTrans();
 	struct DisplayBufData {
 		PSPPointer<u8> topaddr;
-		int linesize, pixelFormat;
+		s32_le linesize, pixelFormat;
 	};
 
-	DisplayBufData disp{ { framebuf }, stride, fmt };
+	DisplayBufData disp;
+	disp.topaddr.ptr = framebuf;
+	disp.linesize = stride;
+	disp.pixelFormat = (s32)fmt;
 
 	FlushRegisters();
 	u32 sz = (u32)sizeof(disp);
@@ -951,12 +1118,16 @@ void Recorder::NotifyBeginFrame() {
 		CheckEdramTrans();
 		struct DisplayBufData {
 			PSPPointer<u8> topaddr;
-			u32 linesize;
-			GEBufferFormat pixelFormat;
+			u32_le linesize;
+			s32_le pixelFormat;
 		};
 
 		DisplayBufData disp;
-		__DisplayGetFramebuf(&disp.topaddr, &disp.linesize, &disp.pixelFormat, 0);
+		u32 linesize = 0;
+		GEBufferFormat pixelFormat = GE_FORMAT_565;
+		__DisplayGetFramebuf(&disp.topaddr, &linesize, &pixelFormat, 0);
+		disp.linesize = linesize;
+		disp.pixelFormat = (s32)pixelFormat;
 
 		FlushRegisters();
 		u32 sz = (u32)sizeof(disp);

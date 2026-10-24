@@ -29,6 +29,7 @@
 #include "Core/MIPS/IR/IRRegCache.h"
 #include "Core/MIPS/IR/IRPassSimplify.h"
 #include "Core/MIPS/IR/IRInterpreter.h"
+#include "GPU/PS3Profile.h"
 #include "Core/MIPS/MIPSTracer.h"
 
 #include <iterator>
@@ -152,12 +153,17 @@ void IRFrontend::CompileDelaySlot() {
 	js.inDelaySlot = false;
 }
 
+// Set once the game changes the FPU rounding mode (backends whose float units ignore it can then
+// compile FPU ops the exact way).
+bool g_irRoundingModeUsed = false;
+
 bool IRFrontend::CheckRounding(u32 blockAddress) {
 	bool cleanSlate = false;
 	if (js.hasSetRounding && !js.lastSetRounding) {
 		WARN_LOG(Log::JIT, "Detected rounding mode usage, rebuilding jit with checks");
 		// Won't loop, since hasSetRounding is only ever set to 1.
 		js.lastSetRounding = js.hasSetRounding;
+		g_irRoundingModeUsed = true;
 		cleanSlate = true;
 	}
 
@@ -317,7 +323,7 @@ MIPSOpcode IRFrontend::GetOffsetInstruction(int offset) {
 	return ReadOp(GetCompilerPC() + 4 * offset);
 }
 
-void IRFrontend::DoJit(u32 em_address, std::vector<IRInst> &instructions, u32 &mipsBytes) {
+void IRFrontend::DoJit(u32 em_address, std::vector<IRInst> &instructions, u32 &mipsBytes, bool optimize) {
 	js.cancel = false;
 	js.blockStart = em_address;
 	js.compilerPC = em_address;
@@ -354,7 +360,7 @@ void IRFrontend::DoJit(u32 em_address, std::vector<IRInst> &instructions, u32 &m
 
 	IRWriter simplified;
 	IRWriter *code = &ir;
-	if (!js.hadBreakpoints) {
+	if (!js.hadBreakpoints && optimize) {
 		std::vector<IRPassFunc> passes{
 			&ApplyMemoryValidation,
 			&RemoveLoadStoreLeftRight,
@@ -373,6 +379,9 @@ void IRFrontend::DoJit(u32 em_address, std::vector<IRInst> &instructions, u32 &m
 			// Add special passes here.
 			passes.push_back(&OptimizeForInterpreter);
 		}
+#if PPSSPP_ARCH(POWERPC)
+		PS3_PROFILE(jitPasses);
+#endif
 		if (IRApplyPasses(passes.data(), passes.size(), ir, simplified, opts))
 			logBlocks = 1;
 		code = &simplified;

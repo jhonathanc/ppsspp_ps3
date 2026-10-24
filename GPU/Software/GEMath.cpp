@@ -294,7 +294,11 @@ float GELightPow(float v, float e) {
 		// the float's bits), truncated toward zero (gpu/probe exp102: e = 1.1 and 0.3, exp4: e = 0.05).
 		int32_t ix;
 		memcpy(&ix, &v, sizeof(ix));
+#if PPSSPP_PLATFORM(PS3)
+		double t = ::trunc((double)e * (double)(ix - 0x3F800000) * (1.0 / 16.0)) * 16.0 + 1065353216.0;
+#else
 		double t = std::trunc((double)e * (double)(ix - 0x3F800000) * (1.0 / 16.0)) * 16.0 + 1065353216.0;
+#endif
 		t = t >= 0.0 ? (t < 2139095039.0 ? t : 2139095039.0) : 0.0;
 		int32_t iy = (int32_t)t;
 		float y;

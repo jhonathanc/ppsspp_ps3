@@ -1754,9 +1754,24 @@ void enable_keepalive(int fd)
  */
 void change_nodelay_mode(int fd, int flag)
 {
+#if PPSSPP_PLATFORM(PS3)
+	WARN_LOG(Log::sceNet, "AdhocServer: TCP_NODELAY is unavailable in the PS3 SDK");
+#else
 	int opt = flag;
 	setsockopt(fd, IPPROTO_TCP, TCP_NODELAY, (char*)&opt, sizeof(opt));
+#endif
 }
+
+#if PPSSPP_PLATFORM(PS3)
+static bool ChangeServerBlockingModePS3(int fd, int nonblocking) {
+	int value = nonblocking ? 1 : 0;
+	if (setsockopt(fd, SOL_SOCKET, SO_NBIO, &value, sizeof(value)) < 0) {
+		ERROR_LOG(Log::sceNet, "AdhocServer: SO_NBIO failed (Socket error %d)", socket_errno);
+		return false;
+	}
+	return true;
+}
+#endif
 
 /**
  * Change Socket Blocking Mode
@@ -1767,7 +1782,9 @@ void change_blocking_mode(int fd, int nonblocking)
 {
 	unsigned long on = 1;
 	unsigned long off = 0;
-#ifdef _WIN32
+#if PPSSPP_PLATFORM(PS3)
+	ChangeServerBlockingModePS3(fd, nonblocking);
+#elif defined(_WIN32)
 	if (nonblocking){
 		// Change to Non-Blocking Mode
 		ioctlsocket(fd, FIONBIO, &on);
@@ -1815,7 +1832,14 @@ int create_listen_socket(uint16_t port)
 		enable_address_reuse(fd); // Shouldn't Reuse the port for built-in AdhocServer to prevent conflict with Dedicated AdhocServer
 
 		// Make Socket Nonblocking
+#if PPSSPP_PLATFORM(PS3)
+		if (!ChangeServerBlockingModePS3(fd, 1)) {
+			closesocket(fd);
+			return -1;
+		}
+#else
 		change_blocking_mode(fd, 1);
+#endif
 
 		// Make TCP Socket send immediately
 		change_nodelay_mode(fd, 1);
@@ -1823,6 +1847,9 @@ int create_listen_socket(uint16_t port)
 		// Prepare Local Address Information
 		struct sockaddr_in local;
 		memset(&local, 0, sizeof(local));
+#if PPSSPP_PLATFORM(PS3)
+		local.sin_len = sizeof(local);
+#endif
 		local.sin_family = AF_INET;
 		local.sin_addr.s_addr = INADDR_ANY;
 		local.sin_port = htons(port);
@@ -1834,7 +1861,15 @@ int create_listen_socket(uint16_t port)
 		if(bindresult != SOCKET_ERROR)
 		{
 			// Switch Socket into Listening Mode
+#if PPSSPP_PLATFORM(PS3)
+			if (listen(fd, SERVER_LISTEN_BACKLOG) < 0) {
+				ERROR_LOG(Log::sceNet, "AdhocServer: Listen failed (Socket error %d)", socket_errno);
+				closesocket(fd);
+				return -1;
+			}
+#else
 			listen(fd, SERVER_LISTEN_BACKLOG);
+#endif
 
 			// Return Socket
 			return fd;
@@ -1894,7 +1929,14 @@ int server_loop(int server)
 				if(loginresult != -1)
 				{
 					// Switch Socket into Non-Blocking Mode
+#if PPSSPP_PLATFORM(PS3)
+					if (!ChangeServerBlockingModePS3(loginresult, 1)) {
+						closesocket(loginresult);
+						loginresult = -1;
+					}
+#else
 					change_blocking_mode(loginresult, 1);
+#endif
 				}
 
 				// Login User (Stream)

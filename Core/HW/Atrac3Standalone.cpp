@@ -1,3 +1,4 @@
+#include "GPU/PS3Profile.h"
 #include "SimpleAudioDec.h"
 #include "Common/LogReporting.h"
 #include "ext/at3_standalone/at3_decoders.h"
@@ -61,6 +62,7 @@ public:
 	}
 
 	bool Decode(const uint8_t *inbuf, int inbytes, int *inbytesConsumed, int outputChannels, int16_t *outbuf, int *outSamples) override {
+		PS3_PROFILE(audioDecode);
 		if (outSamples)
 			*outSamples = 0;
 		if (inbytesConsumed)

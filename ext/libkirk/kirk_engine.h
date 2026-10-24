@@ -58,6 +58,8 @@ extern "C" {
 #define KIRK_INVALID_SIZE 0xF
 #define KIRK_DATA_SIZE_ZERO 0x10
 
+// Command header integer fields below are little-endian wire storage.
+// Use kirk_read32le/kirk_write32le; hashes cover the original bytes.
 typedef struct
 {
 	int mode;    //0

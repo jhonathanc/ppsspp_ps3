@@ -56,6 +56,7 @@ static int __DmacMemcpy(MIPSState *mips, u32 dst, u32 src, u32 size) {
 		if (Memory::IsValidRange(dst, size) && Memory::IsValidRange(src, size)) {
 			memcpy(Memory::GetPointerWriteUnchecked(dst), Memory::GetPointerUnchecked(src), size);
 		}
+		GeListWatchWrite(dst, size, "DmacMemcpy");
 		if (MemBlockInfoDetailed(size)) {
 			NotifyMemInfoCopy(dst, src, size, "DmacMemcpy/");
 		}

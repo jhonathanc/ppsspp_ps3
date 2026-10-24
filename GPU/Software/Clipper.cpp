@@ -24,6 +24,9 @@
 #include "GPU/Software/TransformUnit.h"
 
 #include "Common/Profiler/Profiler.h"
+#include <cstdio>
+#include <cstdlib>
+#include "ppsspp_config.h"
 
 namespace Clipper {
 
@@ -289,6 +292,12 @@ void ProcessTriangle(const ClipVertexData &v0, const ClipVertexData &v1, const C
 		mask |= CalcClipMask(v0.clippos);
 		mask |= CalcClipMask(v1.clippos);
 		mask |= CalcClipMask(v2.clippos);
+#if !PPSSPP_PLATFORM(PS3)
+		static const bool clipLog = getenv("PPSSPP_CLIPLOG") != nullptr;
+		if (clipLog)
+			fprintf(stderr, "CLIP tri z/w %g %g %g w %g %g %g depthClip %d mask %d screenz %d %d %d\n", v0.clippos.z / v0.clippos.w, v1.clippos.z / v1.clippos.w, v2.clippos.z / v2.clippos.w,
+				v0.clippos.w, v1.clippos.w, v2.clippos.w, depthClip ? 1 : 0, mask, (int)v0.v.screenpos.z, (int)v1.v.screenpos.z, (int)v2.v.screenpos.z);
+#endif
 
 		if (OutsideMask(v0.clippos) & OutsideMask(v1.clippos) & OutsideMask(v2.clippos))
 			return;

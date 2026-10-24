@@ -36,7 +36,9 @@
 
 #include "zlib.h"
 
+#if !PPSSPP_PLATFORM(PS3)
 #include "ext/armips/Core/Assembler.h"
+#endif
 
 #include "Common/CommonTypes.h"
 #include "Common/Log.h"
@@ -1454,6 +1456,7 @@ bool SymbolMap::RemoveData(u32 startAddress, bool removeName) {
 	return true;
 }
 
+#if !PPSSPP_PLATFORM(PS3)
 // Transforms the labels to lowercase when returning. Why?
 void SymbolMap::GetLabels(std::vector<LabelDefinition> &dest) {
 	if (activeNeedUpdate_)
@@ -1468,6 +1471,7 @@ void SymbolMap::GetLabels(std::vector<LabelDefinition> &dest) {
 		dest.push_back(entry);
 	}
 }
+#endif
 
 #if defined(_WIN32) && !PPSSPP_PLATFORM(UWP)
 

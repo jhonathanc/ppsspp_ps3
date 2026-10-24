@@ -58,6 +58,7 @@ public:
 	// the native code space. Rises with the block number, until the cache is cleared.
 	int GetEntry() const { return entry_; }
 	void SetEntry(int entry) { entry_ = entry; }
+	void SetNumIRInstructions(u32 count) { numIRInstructions_ = count; }
 	int GetNumIRInstructions() const { return numIRInstructions_; }
 	MIPSOpcode GetOriginalFirstOp() const { return origFirstOpcode_; }
 	bool IsValid() const { return origAddr_ != 0 && origFirstOpcode_.encoding != 0x68FFFFFF; }
@@ -199,6 +200,7 @@ public:
 
 protected:
 	IRJit(MIPSState *mipsState, bool compileToNative);
+	virtual bool UnoptimizedFirst() const { return false; }
 
 	virtual void WriteProfileReport() = 0;
 

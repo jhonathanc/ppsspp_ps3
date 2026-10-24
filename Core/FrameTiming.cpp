@@ -34,6 +34,7 @@
 #include "Core/HW/Display.h"
 #include "Core/HLE/sceNet.h"
 #include "Core/FrameTiming.h"
+#include "GPU/PS3Profile.h"
 
 FrameTiming g_frameTiming;
 
@@ -41,6 +42,7 @@ constexpr double g_MaxSleepTime = 0.5;  // 500ms.
 
 // Note: To avoid hang bugs, this has a maximum of 0.5 second wait time.
 void WaitUntil(double now, double timestamp, const char *reason) {
+	PS3_PROFILE(realTimeWait);
 #if 1
 	// Use precise timing.
 	sleep_precise(std::min(timestamp - now, g_MaxSleepTime), reason);

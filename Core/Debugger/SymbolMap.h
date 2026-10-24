@@ -22,6 +22,7 @@
 #include <string>
 
 #include "Common/CommonTypes.h"
+#include "ppsspp_config.h"
 #include "Common/File/Path.h"
 
 // Next plans for the symbol map
@@ -144,7 +145,9 @@ public:
 #ifdef _WIN32
 	void FillSymbolListBox(HWND listbox, SymbolType symType);
 #endif
+#if !PPSSPP_PLATFORM(PS3)
 	void GetLabels(std::vector<LabelDefinition> &dest);
+#endif
 
 	// crc is optional (0 = unknown) and lets a reload of the same-named module be told apart
 	// from a different binary that just happens to share a name (common with generic module
@@ -260,4 +263,3 @@ private:
 };
 
 extern SymbolMap *g_symbolMap;
-

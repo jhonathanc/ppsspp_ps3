@@ -19,6 +19,7 @@
 
 #include "ppsspp_config.h"
 #include "Common/CommonTypes.h"
+#include "Common/Swap.h"
 
 inline u8 Convert4To8(u8 v) {
 	// Swizzle bits: 00001234 -> 12341234
@@ -168,3 +169,46 @@ void ConvertRGB565ToBGR565(u16 *dst, const u16 *src, u32 numPixels);
 void ConvertBGRA5551ToABGR1555(u16 *dst, const u16 *src, u32 numPixels);
 
 void ConvertRGBA8888ToPremulAlpha(u32 *dst, const u32 *src, u32 numPixels);
+
+#if COMMON_BIG_ENDIAN
+// Convert PSP little-endian input to native pixel values before using the
+// existing converters. Kept in bounded chunks to avoid a framebuffer-sized copy.
+template <typename Dst, typename Native, typename LittleEndian>
+inline void ConvertLittleEndianPixels(Dst *dst, const LittleEndian *src, u32 numPixels,
+	void (*convert)(Dst *, const Native *, u32)) {
+	alignas(16) Native native[256];
+	while (numPixels != 0) {
+		u32 count = numPixels < 256 ? numPixels : 256;
+		for (u32 i = 0; i < count; ++i)
+			native[i] = src[i];
+		convert(dst, native, count);
+		dst += count;
+		src += count;
+		numPixels -= count;
+	}
+}
+inline void ConvertRGB565ToBGR565(u16 *dst, const u16_le *src, u32 numPixels) {
+	ConvertLittleEndianPixels<u16, u16>(dst, src, numPixels, ConvertRGB565ToBGR565);
+}
+inline void ConvertRGB565ToBGRA8888(u32 *dst, const u16_le *src, u32 numPixels) {
+	ConvertLittleEndianPixels<u32, u16>(dst, src, numPixels, ConvertRGB565ToBGRA8888);
+}
+inline void ConvertRGB565ToRGBA8888(u32 *dst, const u16_le *src, u32 numPixels) {
+	ConvertLittleEndianPixels<u32, u16>(dst, src, numPixels, ConvertRGB565ToRGBA8888);
+}
+inline void ConvertRGBA5551ToBGRA8888(u32 *dst, const u16_le *src, u32 numPixels) {
+	ConvertLittleEndianPixels<u32, u16>(dst, src, numPixels, ConvertRGBA5551ToBGRA8888);
+}
+inline void ConvertRGBA5551ToRGBA8888(u32 *dst, const u16_le *src, u32 numPixels) {
+	ConvertLittleEndianPixels<u32, u16>(dst, src, numPixels, ConvertRGBA5551ToRGBA8888);
+}
+inline void ConvertRGBA4444ToBGRA8888(u32 *dst, const u16_le *src, u32 numPixels) {
+	ConvertLittleEndianPixels<u32, u16>(dst, src, numPixels, ConvertRGBA4444ToBGRA8888);
+}
+inline void ConvertRGBA4444ToRGBA8888(u32 *dst, const u16_le *src, u32 numPixels) {
+	ConvertLittleEndianPixels<u32, u16>(dst, src, numPixels, ConvertRGBA4444ToRGBA8888);
+}
+inline void ConvertBGRA8888ToRGBA8888(u32 *dst, const u32_le *src, u32 numPixels) {
+	ConvertLittleEndianPixels<u32, u32>(dst, src, numPixels, ConvertBGRA8888ToRGBA8888);
+}
+#endif

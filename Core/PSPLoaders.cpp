@@ -26,6 +26,9 @@
 #include "Common/File/AndroidContentURI.h"
 #include "Common/File/FileUtil.h"
 #include "Common/StringUtils.h"
+#if PPSSPP_PLATFORM(PS3)
+#include <sys/syslimits.h>
+#endif
 #ifdef _WIN32
 #include "Common/CommonWindows.h"
 #endif

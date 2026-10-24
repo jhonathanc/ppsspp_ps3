@@ -24,6 +24,8 @@
 #include <condition_variable>
 #include <vector>
 #include <thread>
+#include <chrono>
+#include <unistd.h>
 #include <snappy-c.h>
 #include <zstd.h>
 
@@ -55,6 +57,10 @@
 #include "GPU/Debugger/Record.h"
 #include "GPU/Debugger/RecordFormat.h"
 
+#ifdef PPSSPP_RSX_HOSTSIM
+void HostSimRSXFrame();
+#endif
+
 namespace GPURecord {
 
 // Provide the illusion of synchronous execution, although the playback is actually running on a different thread.
@@ -77,6 +83,13 @@ static const char *OpTypeToString(OpType type) {
 	case OpType::Done: return "Done";
 	default: return "N/A";
 	}
+}
+
+// Dumps recorded by the PS3 port before Frontend 36 have every field big-endian (the format is
+// little-endian). Fields below are read as little-endian, then put through Fix().
+static bool g_legacyBE = false;
+static inline u32 Fix(u32 v) {
+	return g_legacyBE ? bswap32(v) : v;
 }
 
 struct Operation {
@@ -401,7 +414,7 @@ private:
 	u32 execListPos = 0;
 	u32 execListID = 0;
 	const int LIST_BUF_SIZE = 256 * 1024;
-	std::vector<u32> execListQueue;
+	std::vector<u32_le> execListQueue;  // Copied to PSP memory as is: little-endian on any host.
 	u16 lastBufw_[8]{};
 	u32 lastTex_[8]{};
 	int prims_ = 0;
@@ -538,6 +551,11 @@ void DumpExecute::Registers(u32 ptr, u32 sz) {
 	u32 writePos = execListPos;
 	void *srcData = (void *)(pushbuf_.data() + ptr);
 	Memory::MemcpyUnchecked(execListPos, srcData, sz);
+	if (g_legacyBE) {
+		u32_le *words = (u32_le *)Memory::GetPointerWriteUnchecked(execListPos);
+		for (u32 i = 0; i < sz / 4; ++i)
+			words[i] = bswap32(words[i]);
+	}
 	execListPos += sz;
 
 	// TODO: Unfortunate.  Maybe Texture commands should contain the bufw instead.
@@ -585,7 +603,7 @@ void DumpExecute::Registers(u32 ptr, u32 sz) {
 		if (cmd == GE_CMD_CLEARMODE)
 			clearMode_ = ops[i] & 0xFFFF;
 		if (cmd == GE_CMD_PRIM || cmd == GE_CMD_BEZIER || cmd == GE_CMD_SPLINE) {
-			MarkDrawn(cmd == GE_CMD_PRIM ? ops[i] & 0x00FFFFFF : 0);
+			MarkDrawn(cmd == GE_CMD_PRIM ? (u32)ops[i] & 0x00FFFFFF : 0);
 			prims_++;
 			if (g_drawLimit > 0 && prims_ > g_drawLimit)
 				ops[i] = GE_CMD_NOP << 24;
@@ -791,12 +809,12 @@ void DumpExecute::Indices(u32 ptr, u32 sz) {
 
 void DumpExecute::ClutAddr(u32 ptr, u32 sz) {
 	struct ClutAddrData {
-		u32 addr;
-		u32 flags;
+		u32_le addr;
+		u32_le flags;
 	};
 	const ClutAddrData *data = (const ClutAddrData *)(pushbuf_.data() + ptr);
-	execClutAddr = data->addr;
-	execClutFlags = data->flags;
+	execClutAddr = Fix(data->addr);
+	execClutFlags = Fix(data->flags);
 }
 
 void DumpExecute::Clut(u32 ptr, u32 sz) {
@@ -880,13 +898,18 @@ static void SetMemory(u32 addr, u8 value, u32 size) {
 
 void DumpExecute::Memset(u32 ptr, u32 sz) {
 	PROFILE_THIS_SCOPE("ReplayMemset");
+	struct MemsetCommandLE {
+		u32_le dest;
+		u32_le value;
+		u32_le sz;
+	};
+	const MemsetCommandLE *raw = (const MemsetCommandLE *)(pushbuf_.data() + ptr);
 	struct MemsetCommand {
 		u32 dest;
 		int value;
 		u32 sz;
-	};
-
-	const MemsetCommand *data = (const MemsetCommand *)(pushbuf_.data() + ptr);
+	} fixed{ Fix(raw->dest), (int)Fix(raw->value), Fix(raw->sz) };
+	const MemsetCommand *data = &fixed;
 
 	const u32 size = Memory::ClampValidSizeAt(data->dest, data->sz);
 	if (Memory::IsVRAMAddress(data->dest) && size != 0) {
@@ -901,7 +924,7 @@ void DumpExecute::Memset(u32 ptr, u32 sz) {
 }
 
 void DumpExecute::MemcpyDest(u32 ptr, u32 sz) {
-	execMemcpyDest = *(const u32 *)(pushbuf_.data() + ptr);
+	execMemcpyDest = Fix(*(const u32_le *)(pushbuf_.data() + ptr));
 }
 
 void DumpExecute::Memcpy(u32 ptr, u32 sz) {
@@ -934,14 +957,20 @@ void DumpExecute::Texture(int level, u32 ptr, u32 sz) {
 
 void DumpExecute::Framebuf(int level, u32 ptr, u32 sz, bool needed) {
 	PROFILE_THIS_SCOPE("ReplayFramebuf");
+	struct FramebufDataLE {
+		u32_le addr;
+		u32_le bufw;
+		u32_le flags;
+		u32_le pad;
+	};
+	const FramebufDataLE *raw = (const FramebufDataLE *)(pushbuf_.data() + ptr);
 	struct FramebufData {
 		u32 addr;
 		int bufw;
 		u32 flags;
 		u32 pad;
-	};
-
-	FramebufData *framebuf = (FramebufData *)(pushbuf_.data() + ptr);
+	} fixed{ Fix(raw->addr), (int)Fix(raw->bufw), Fix(raw->flags), 0 };
+	const FramebufData *framebuf = &fixed;
 
 	if (lastTex_[level] != framebuf->addr || lastBufw_[level] != framebuf->bufw) {
 		u32 bufwCmd = GE_CMD_TEXBUFWIDTH0 + level;
@@ -957,6 +986,17 @@ void DumpExecute::Framebuf(int level, u32 ptr, u32 sz, bool needed) {
 	u32 pspSize = sz - headerSize;
 	const bool isTarget = (framebuf->flags & 1) != 0;
 	const bool unchangedVRAM = version_ >= 6 && (framebuf->flags & 2) != 0;
+#if !PPSSPP_PLATFORM(PS3)
+	{
+		static const bool vtexLog = getenv("PPSSPP_VTEXLOG") != nullptr;  // Test builds: VRAM texture data in the dump.
+		if (vtexLog) {
+			uint32_t h = 2166136261u;
+			const u8 *d = pushbuf_.data() + ptr + sizeof(FramebufDataLE);
+			for (u32 i = 0; i < sz - sizeof(FramebufDataLE); ++i) h = (h ^ d[i]) * 16777619u;
+			fprintf(stderr, "VTEX %08x bufw %d flags %x bytes %u hash %08x\n", framebuf->addr, framebuf->bufw, framebuf->flags, (unsigned)(sz - sizeof(FramebufDataLE)), h);
+		}
+	}
+#endif
 	// TODO: Could use drawnVRAM flag, but it can be wrong.
 	// Could potentially always skip if !isTarget, but playing it safe for offset texture behavior.
 	// The software renderer skips a render target's unless something later relies on it: one drawn before the
@@ -1063,29 +1103,32 @@ void DumpExecute::CopyAroundDrawn(u32 addr, const u8 *data, u32 size, bool linea
 
 void DumpExecute::Display(u32 ptr, u32 sz, bool allowFlip) {
 	struct DisplayBufData {
-		PSPPointer<u8> topaddr;
-		int linesize, pixelFormat;
+		u32_le topaddr;
+		u32_le linesize, pixelFormat;
 	};
 
-	DisplayBufData *disp = (DisplayBufData *)(pushbuf_.data() + ptr);
+	const DisplayBufData *disp = (const DisplayBufData *)(pushbuf_.data() + ptr);
+	const u32 topaddr = Fix(disp->topaddr);
+	const int linesize = (int)Fix(disp->linesize), pixelFormat = (int)Fix(disp->pixelFormat);
 
 	// Sync up drawing.
 	SyncStall();
 
 	// A display turned off shows nothing to compare, so the result falls back to the last framebuffer
 	// drawn to, as for a dump without a DISPLAY (Auditorium 9213). The PSP replayer does the same.
-	haveDisplay_ = disp->topaddr.ptr != 0;
+	haveDisplay_ = topaddr != 0;
 	if (!haveDisplay_)
 		return;
-	__DisplaySetFramebuf(disp->topaddr.ptr, disp->linesize, disp->pixelFormat, 1);
+	__DisplaySetFramebuf(topaddr, linesize, pixelFormat, 1);
 	if (allowFlip) {
-		__DisplaySetFramebuf(disp->topaddr.ptr, disp->linesize, disp->pixelFormat, 0);
+		__DisplaySetFramebuf(topaddr, linesize, pixelFormat, 0);
 	}
 }
 
 void DumpExecute::EdramTrans(u32 ptr, u32 sz) {
-	uint32_t value;
-	memcpy(&value, pushbuf_.data() + ptr, 4);
+	u32_le valueLE;
+	memcpy(&valueLE, pushbuf_.data() + ptr, 4);
+	const uint32_t value = Fix(valueLE);
 
 	// Sync up drawing.
 	SyncStall();
@@ -1129,6 +1172,15 @@ ReplayResult DumpExecute::Run() {
 				++i;
 			continue;
 		}
+#if !PPSSPP_PLATFORM(PS3)
+		static const bool cmdLog = getenv("PPSSPP_DUMPCMDLOG") != nullptr;
+		if (cmdLog && cmd.type != CommandType::REGISTERS && cmd.type != CommandType::VERTICES && cmd.type != CommandType::INDICES) {
+			u32 first = 0;
+			if (cmd.sz >= 4)
+				first = Fix(*(const u32_le *)(pushbuf_.data() + cmd.ptr));
+			fprintf(stderr, "CMD %u type %d sz %u first word %08x\n", (unsigned)i, (int)cmd.type, (unsigned)cmd.sz, first);
+		}
+#endif
 		switch (cmd.type) {
 		case CommandType::INIT:
 			Init(cmd.ptr, cmd.sz);
@@ -1213,6 +1265,25 @@ ReplayResult DumpExecute::Run() {
 		__DisplaySetFramebuf(addr, fbWidth_ & 0x07FC, fbFormat_, 1);
 		__DisplaySetFramebuf(addr, fbWidth_ & 0x07FC, fbFormat_, 0);
 	}
+#ifdef PPSSPP_RSX_HOSTSIM
+	::HostSimRSXFrame();
+#endif
+#if !PPSSPP_PLATFORM(PS3)
+	// Test builds: PPSSPP_REPLAY_BENCH=N times N passes over the dump, then exits.
+	static const int benchPasses = getenv("PPSSPP_REPLAY_BENCH") ? atoi(getenv("PPSSPP_REPLAY_BENCH")) : 0;
+	if (benchPasses > 0) {
+		static int pass = 0;
+		static auto t0 = std::chrono::steady_clock::now();
+		if (pass == 1)
+			t0 = std::chrono::steady_clock::now();  // The first pass compiles and decodes: skip it.
+		if (++pass > benchPasses) {
+			const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+			fprintf(stderr, "REPLAY BENCH: %.3f ms per pass over %d passes\n", ms / (benchPasses - 1 > 0 ? benchPasses - 1 : 1), benchPasses - 1);
+			fflush(stderr);
+			_exit(0);
+		}
+	}
+#endif
 	return ReplayResult::Done;
 }
 
@@ -1220,10 +1291,11 @@ ReplayResult DumpExecute::Run() {
 // allocating for them.
 template <typename T>
 static bool ReadCompressed(u32 fp, u64 fileSize, std::vector<T> &dest, u32 count, uint32_t version) {
-	u32 compressed_size = 0;
-	if (pspFileSystem.ReadFile(fp, (u8 *)&compressed_size, sizeof(compressed_size)) != sizeof(compressed_size)) {
+	u32_le compressedLE = 0;
+	if (pspFileSystem.ReadFile(fp, (u8 *)&compressedLE, sizeof(compressedLE)) != sizeof(compressedLE)) {
 		return false;
 	}
+	const u32 compressed_size = Fix(compressedLE);
 	const u64 pos = pspFileSystem.GetSeekPos(fp);
 	if (pos > fileSize || compressed_size > fileSize - pos) {
 		return false;
@@ -1319,7 +1391,7 @@ static bool ValidateReplayCommands(const std::vector<Command> &commands, const s
 		// Old recorders didn't align anything, so only the range and size are checked.
 		if (cmd.ptr > pushbuf.size() || cmd.sz > pushbuf.size() - cmd.ptr || cmd.sz < minSize) {
 			ERROR_LOG(Log::GeDebugger, "Invalid GE dump command %d: type %d, offset %u, size %u",
-				(int)i, (int)cmd.type, cmd.ptr, cmd.sz);
+				(int)i, (int)cmd.type, (u32)cmd.ptr, (u32)cmd.sz);
 			return false;
 		}
 	}
@@ -1338,6 +1410,13 @@ static u32 LoadReplay(const std::string &filename) {
 	Header header{};
 	const size_t headerRead = pspFileSystem.ReadFile(fp, (u8 *)&header, sizeof(header));
 	u32 version = header.version;
+	g_legacyBE = false;
+	if ((version > VERSION || version < MIN_VERSION) && bswap32(version) <= VERSION && bswap32(version) >= MIN_VERSION) {
+		g_legacyBE = true;
+		version = bswap32(version);
+		header.version = version;
+		NOTICE_LOG(Log::GeDebugger, "Big-endian GE dump (PS3 port before Frontend 36)");
+	}
 
 	if (headerRead != sizeof(header) || memcmp(header.magic, HEADER_MAGIC, sizeof(header.magic)) != 0 || header.version > VERSION || header.version < MIN_VERSION) {
 		ERROR_LOG(Log::GeDebugger, "Invalid GE dump or unsupported version");
@@ -1366,16 +1445,24 @@ static u32 LoadReplay(const std::string &filename) {
 		System_SetWindowTitle("(GE frame dump: old format, missing DISC_ID)");
 	}
 
-	u32 sz = 0;
-	pspFileSystem.ReadFile(fp, (u8 *)&sz, sizeof(sz));
-	u32 bufsz = 0;
-	pspFileSystem.ReadFile(fp, (u8 *)&bufsz, sizeof(bufsz));
+	u32_le szLE = 0;
+	pspFileSystem.ReadFile(fp, (u8 *)&szLE, sizeof(szLE));
+	u32_le bufszLE = 0;
+	pspFileSystem.ReadFile(fp, (u8 *)&bufszLE, sizeof(bufszLE));
+	const u32 sz = Fix(szLE), bufsz = Fix(bufszLE);
 
 	bool truncated = false;
 	truncated = truncated || !ReadCompressed(fp, fileSize, lastExecCommands, sz, header.version);
 	truncated = truncated || !ReadCompressed(fp, fileSize, lastExecPushbuf, bufsz, header.version);
 
 	pspFileSystem.CloseFile(fp);
+
+	if (g_legacyBE && !truncated) {
+		for (Command &cmd : lastExecCommands) {
+			cmd.sz = bswap32(cmd.sz);
+			cmd.ptr = bswap32(cmd.ptr);
+		}
+	}
 
 	if (truncated) {
 		ERROR_LOG(Log::GeDebugger, "Truncated GE dump detected - can't replay");
@@ -1448,7 +1535,7 @@ void WriteRunDumpCode(u32 codeStart) {
 // A long term goal is inversion of control here, but it's tricky for a number of reasons that you'll find
 // out if you try.
 ReplayResult RunMountedReplay(const std::string &filename) {
-	_assert_msg_(!gpu->GetRecorder()->IsActivePending(), "Cannot run replay while recording.");
+	_assert_msg_(g_dumpRecordReplays || !gpu->GetRecorder()->IsActivePending(), "Cannot run replay while recording.");
 
 	uint32_t version = lastExecVersion;
 	if (lastExecFilename != filename) {

@@ -25,6 +25,7 @@
 // An approximation of what the interface will look like. Similar to JPCSP's.
 
 #include <map>
+#include <string>
 #include "Common/CommonTypes.h"
 #include "Core/HLE/sceMpeg.h"
 #include "Core/HW/MpegDemux.h"
@@ -49,6 +50,27 @@ inline s64 getMpegTimeStamp(const u8 *buf) {
 #ifdef USE_FFMPEG
 bool InitFFmpeg();
 #endif
+
+// Video cutscene decoding (PS3 setting "videos"): 1 on, 0 off (no video stream is opened: games
+// see what they did without FFmpeg, and most skip the video), -1 auto (off for games whose video
+// playback is known to hang).
+extern int g_mediaVideoDecode;
+// Whether this build has FFmpeg (video, MP3/AAC decoding).
+bool MediaEngineHasFFmpeg();
+// g_mediaVideoDecode for the running game (auto decided by game ID). Also used by sceVideocodec.
+bool MediaVideoDecodeEnabled();
+
+// Diagnostics (PS3 stall report): which step of opening or decoding a movie the emulation thread is
+// in, e.g. "reading data (12 reads this call)".
+std::string MediaDecodeStepText();
+// Called before a movie's buffers are allocated, with the bytes about to be needed in one piece, so
+// the frontend can free memory first (PS3: little main memory, and it fragments).
+extern void (*g_mediaMemoryHook)(const char *what, int bytes);
+// H.264 deblocking in videos: 1 on, 0 off (with FFmpeg's fast paths: faster decoding, a little
+// blockier), -1 auto (on until a movie falls below full speed, then off for that movie).
+extern int g_mediaDeblock;
+// Killzone with videos set to On: the built-in sceMpeg instead of its disc's mpeg.prx.
+bool MediaGameUsesHLEMpeg();
 
 class MediaEngine {
 public:
@@ -120,6 +142,10 @@ public:  // TODO: Very little of this below should be public.
 	s64 m_lastTimeStamp = 0;
 
 	bool m_isVideoEnd = false;
+	// g_mediaDeblock auto: deblocking switched off for this movie, and the speed measured so far.
+	bool m_deblockOff = false;
+	double m_speedStart = 0.0, m_speedLast = 0.0;
+	u64 m_speedTicks = 0;
 
 private:
 #ifdef USE_FFMPEG

@@ -29,6 +29,7 @@
 #include "Core/HLE/FunctionWrappers.h"
 #include "Core/HLE/ErrorCodes.h"
 #include "Core/HLE/scePsmf.h"
+#include "Core/HLE/sceDisplay.h"
 #include "Core/HLE/sceMpeg.h"
 #include "Core/HLE/sceKernelMemory.h"
 #include "Core/HW/MediaEngine.h"
@@ -1133,15 +1134,15 @@ static int scePsmfPlayerCreate(u32 psmfPlayer, u32 dataPtr) {
 	if (!data->buffer.IsValid()) {
 		// Also crashes on a PSP.
 		*player = 0;
-		return hleReportError(Log::ME, SCE_KERNEL_ERROR_ILLEGAL_ADDRESS, "invalid buffer address %08x", data->buffer.ptr);
+		return hleReportError(Log::ME, SCE_KERNEL_ERROR_ILLEGAL_ADDRESS, "invalid buffer address %08x", (unsigned int)data->buffer.ptr);
 	}
 	if (data->bufferSize < 0x00285800) {
 		*player = 0;
-		return hleReportError(Log::ME, SCE_PSMFPLAYER_ERROR_BUFFER_SIZE, "buffer too small %08x", data->bufferSize);
+		return hleReportError(Log::ME, SCE_PSMFPLAYER_ERROR_BUFFER_SIZE, "buffer too small %08x", (unsigned int)data->bufferSize);
 	}
 	if (data->threadPriority < 0x10 || data->threadPriority >= 0x6E) {
 		*player = 0;
-		return hleReportError(Log::ME, SCE_PSMFPLAYER_ERROR_INVALID_PARAM, "bad thread priority %02x", data->threadPriority);
+		return hleReportError(Log::ME, SCE_PSMFPLAYER_ERROR_INVALID_PARAM, "bad thread priority %02x", (unsigned int)data->threadPriority);
 	}
 	if (!psmfPlayerMap.empty()) {
 		*player = 0;
@@ -1381,20 +1382,20 @@ static int scePsmfPlayerStart(u32 psmfPlayer, u32 psmfPlayerData, int initPts)
 
 	if (psmfplayer->totalAudioStreams > 0) {
 		if (playerData->audioCodec != 0x0F && playerData->audioCodec != 0x01) {
-			ERROR_LOG_REPORT(Log::ME, "scePsmfPlayerStart(%08x, %08x, %d): invalid audio codec %02x", psmfPlayer, psmfPlayerData, initPts, playerData->audioCodec);
+			ERROR_LOG_REPORT(Log::ME, "scePsmfPlayerStart(%08x, %08x, %d): invalid audio codec %02x", psmfPlayer, psmfPlayerData, initPts, (unsigned int)playerData->audioCodec);
 			return hleNoLog(SCE_PSMFPLAYER_ERROR_INVALID_STREAM);
 		}
 		if (playerData->audioStreamNum >= psmfplayer->totalAudioStreams) {
-			ERROR_LOG_REPORT(Log::ME, "scePsmfPlayerStart(%08x, %08x, %d): unable to change audio stream to %d", psmfPlayer, psmfPlayerData, initPts, playerData->audioStreamNum);
+			ERROR_LOG_REPORT(Log::ME, "scePsmfPlayerStart(%08x, %08x, %d): unable to change audio stream to %d", psmfPlayer, psmfPlayerData, initPts, (int)playerData->audioStreamNum);
 			return hleNoLog(SCE_PSMFPLAYER_ERROR_INVALID_CONFIG);
 		}
 	}
 	if (playerData->videoCodec != 0x0E && playerData->videoCodec != 0x00) {
-		ERROR_LOG_REPORT(Log::ME, "scePsmfPlayerStart(%08x, %08x, %d): invalid video codec %02x", psmfPlayer, psmfPlayerData, initPts, playerData->videoCodec);
+		ERROR_LOG_REPORT(Log::ME, "scePsmfPlayerStart(%08x, %08x, %d): invalid video codec %02x", psmfPlayer, psmfPlayerData, initPts, (unsigned int)playerData->videoCodec);
 		return hleNoLog(SCE_PSMFPLAYER_ERROR_INVALID_STREAM);
 	}
 	if (playerData->videoStreamNum < 0 || playerData->videoStreamNum >= psmfplayer->totalVideoStreams) {
-		ERROR_LOG_REPORT(Log::ME, "scePsmfPlayerStart(%08x, %08x, %d): unable to change video stream to %d", psmfPlayer, psmfPlayerData, initPts, playerData->videoStreamNum);
+		ERROR_LOG_REPORT(Log::ME, "scePsmfPlayerStart(%08x, %08x, %d): unable to change video stream to %d", psmfPlayer, psmfPlayerData, initPts, (int)playerData->videoStreamNum);
 		return hleNoLog(SCE_PSMFPLAYER_ERROR_INVALID_CONFIG);
 	}
 
@@ -1433,7 +1434,7 @@ static int scePsmfPlayerStart(u32 psmfPlayer, u32 psmfPlayerData, int initPts)
 	psmfplayer->playMode = playerData->playMode;
 	psmfplayer->playSpeed = playerData->playSpeed;
 
-	WARN_LOG(Log::ME, "scePsmfPlayerStart(%08x, %08x, %d (mode %d, speed %d)", psmfPlayer, psmfPlayerData, initPts, playerData->playMode, playerData->playSpeed);
+	WARN_LOG(Log::ME, "scePsmfPlayerStart(%08x, %08x, %d (mode %d, speed %d)", psmfPlayer, psmfPlayerData, initPts, (int)playerData->playMode, (int)playerData->playSpeed);
 
 	// Does not alter current pts, it just catches up when Update()/etc. get there.
 
@@ -1555,10 +1556,10 @@ static int scePsmfPlayerGetVideoData(u32 psmfPlayer, u32 videoDataAddr)
 		return hleLogError(Log::ME, SCE_KERNEL_ERROR_INVALID_POINTER, "invalid data pointer");
 	}
 	if (videoData->frameWidth < 0) {
-		return hleLogError(Log::ME, SCE_KERNEL_ERROR_PRIV_REQUIRED, "illegal bufw %d", videoData->frameWidth);
+		return hleLogError(Log::ME, SCE_KERNEL_ERROR_PRIV_REQUIRED, "illegal bufw %d", (int)videoData->frameWidth);
 	}
 	if (videoData->frameWidth != 0 && videoData->frameWidth < psmfplayer->mediaengine->VideoWidth()) {
-		return hleLogError(Log::ME, SCE_KERNEL_ERROR_INVALID_VALUE, "bufw %d smaller than width %d", videoData->frameWidth, psmfplayer->mediaengine->VideoWidth());
+		return hleLogError(Log::ME, SCE_KERNEL_ERROR_INVALID_VALUE, "bufw %d smaller than width %d", (int)videoData->frameWidth, psmfplayer->mediaengine->VideoWidth());
 	}
 
 	hleEatCycles(20000);
@@ -1579,7 +1580,7 @@ static int scePsmfPlayerGetVideoData(u32 psmfPlayer, u32 videoDataAddr)
 
 	// It's fine to pass an invalid value here if it's still warming up, but after that it's not okay.
 	if (!Memory::IsValidAddress(videoData->displaybuf)) {
-		return hleLogError(Log::ME, SCE_KERNEL_ERROR_INVALID_POINTER, "invalid buffer pointer %08x", videoData->displaybuf);
+		return hleLogError(Log::ME, SCE_KERNEL_ERROR_INVALID_POINTER, "invalid buffer pointer %08x", (unsigned int)videoData->displaybuf);
 	}
 
 	bool doVideoStep = true;
@@ -1613,10 +1614,11 @@ static int scePsmfPlayerGetVideoData(u32 psmfPlayer, u32 videoDataAddr)
 	}
 
 	// It seems the frameWidth is rounded down to even values, and defaults to 512.
-	int bufw = videoData->frameWidth == 0 ? 512 : videoData->frameWidth & ~1;
+	int bufw = videoData->frameWidth == 0 ? 512 : static_cast<int>(videoData->frameWidth) & ~1;
 	// Always write the video frame, even after the video has ended.
 	int displaybufSize = psmfplayer->mediaengine->writeVideoImage(videoData->displaybuf, bufw, videoPixelMode);
 	gpu->PerformWriteFormattedFromMemory(videoData->displaybuf, displaybufSize, bufw, (GEBufferFormat)videoPixelMode);
+	__DisplayNoteVideoFrame(psmfplayer->mediaengine->getVideoTimeStamp());
 	__PsmfUpdatePts(psmfplayer, videoData);
 
 	_PsmfPlayerFillRingbuffer(psmfplayer);

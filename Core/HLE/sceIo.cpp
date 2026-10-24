@@ -310,6 +310,8 @@ public:
 	s64 asyncResult = 0;
 	bool hasAsyncResult = false;
 	bool pendingAsyncResult = false;
+	// A read into VRAM on the IO thread, reported to the GPU when it completes (not saved).
+	u32 vramReadAddr = 0, vramReadSize = 0;
 
 	bool sectorBlockMode = false;
 	// TODO: Use an enum instead?
@@ -339,6 +341,8 @@ public:
 /******************************************************************************/
 
 u64 __IoCompleteAsyncIO(FileNode *f);
+// GPU/Software/SoftGpu.cpp: a read into VRAM has finished (for a hardware renderer's copies).
+void GPUNotifyCpuVramWrite(u32 addr, u32 size);
 
 static void IoAsyncCleanupThread(int fd) {
 	if (asyncThreads[fd]) {
@@ -875,6 +879,10 @@ u64 __IoCompleteAsyncIO(FileNode *f) {
 	} else {
 		// It's okay, not all operations are deferred.
 	}
+	if (f->vramReadSize) {
+		GPUNotifyCpuVramWrite(f->vramReadAddr, f->vramReadSize);
+		f->vramReadSize = 0;
+	}
 	if (f->callbackID) {
 		__KernelNotifyCallback(f->callbackID, f->callbackArg);
 	}
@@ -1024,7 +1032,7 @@ static u32 sceIoChstat(const char *filename, u32 iostatptr, u32 changebits) {
 	if (changebits & SCE_CST_AT)
 		ERROR_LOG(Log::sceIo, "sceIoChstat: change access time requested");
 	if (changebits & SCE_CST_MT)
-		ERROR_LOG_REPORT(Log::sceIo, "sceIoChstat: change modification time to %04d-%02d-%02d requested", iostat->st_m_time.year, iostat->st_m_time.month, iostat->st_m_time.day);
+		ERROR_LOG_REPORT(Log::sceIo, "sceIoChstat: change modification time to %04d-%02d-%02d requested", (int)iostat->st_m_time.year, (int)iostat->st_m_time.month, (int)iostat->st_m_time.day);
 	if (changebits & SCE_CST_PRVT)
 		ERROR_LOG(Log::sceIo, "sceIoChstat: change private data requested");
 	return 0;
@@ -1138,6 +1146,7 @@ static bool __IoRead(int &result, int id, u32 data_addr, int size, int &us) {
 			if (f->npdrm) {
 				result = npdrmRead(f, data, validSize);
 				currentMIPS->InvalidateICacheRangeDeferred(data_addr, validSize);
+				GPUNotifyCpuVramWrite(data_addr, validSize);
 				return true;
 			}
 
@@ -1156,6 +1165,10 @@ static bool __IoRead(int &result, int id, u32 data_addr, int size, int &us) {
 				ev.bytes = validSize;
 				ev.invalidateAddr = data_addr;
 				ioManager.ScheduleOperation(ev);
+				if (Memory::IsVRAMAddress(data_addr)) {
+					f->vramReadAddr = data_addr;
+					f->vramReadSize = validSize;
+				}
 				return false;
 			} else {
 				if (GetIOTimingMethod() != IOTIMING_REALISTIC) {
@@ -1164,6 +1177,7 @@ static bool __IoRead(int &result, int id, u32 data_addr, int size, int &us) {
 					result = (int)pspFileSystem.ReadFile(f->handle, data, validSize, us);
 				}
 				currentMIPS->InvalidateICacheRangeDeferred(data_addr, validSize);
+				GPUNotifyCpuVramWrite(data_addr, validSize);
 				return true;
 			}
 		} else {

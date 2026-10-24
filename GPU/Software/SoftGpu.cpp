@@ -15,7 +15,12 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include "Common/FrontendTrace.h"
 #include <set>
+#include <atomic>
+#include <cstdarg>
+#include <map>
+#include <algorithm>
 
 #include "Common/System/Display.h"
 #include "Common/Serialize/Serializer.h"
@@ -40,9 +45,12 @@
 
 #include "GPU/GPUCommon.h"
 #include "GPU/Software/DrawPixel.h"
+#include "GPU/Software/HardwareBackend.h"
+#include "GPU/PS3Profile.h"
 #include "GPU/Software/Rasterizer.h"
 #include "GPU/Software/Sampler.h"
 #include "GPU/Software/SoftGpu.h"
+#include "Core/MIPS/IR/IRInterpreter.h"
 #include "GPU/Software/TransformUnit.h"
 #include "GPU/Common/DrawEngineCommon.h"
 #include "GPU/Common/PresentationCommon.h"
@@ -62,6 +70,8 @@ struct CommandInfo {
 	SoftGPU::CmdFunc func;
 };
 static CommandInfo softgpuCmdInfo[256];
+// 1 for commands that can change draw state (Rasterizer::g_geStateSerial).
+static uint8_t softgpuStateCmd[256];
 
 struct SoftwareCommandTableEntry {
 	uint8_t cmd;
@@ -178,7 +188,7 @@ const SoftwareCommandTableEntry softgpuCommandTable[] = {
 	{ GE_CMD_TEXSIZE6, 0, SoftDirty::SAMPLER_TEXLIST | SoftDirty::BINNER_OVERLAP },
 	{ GE_CMD_TEXSIZE7, 0, SoftDirty::SAMPLER_TEXLIST | SoftDirty::BINNER_OVERLAP },
 	{ GE_CMD_TEXFORMAT, 0, SoftDirty::SAMPLER_BASIC | SoftDirty::SAMPLER_TEXLIST | SoftDirty::BINNER_OVERLAP },
-	{ GE_CMD_TEXLEVEL, 0, SoftDirty::RAST_TEX },
+	{ GE_CMD_TEXLEVEL, 0, SoftDirty::RAST_TEXLEVEL },
 	{ GE_CMD_TEXLODSLOPE, 0, SoftDirty::RAST_TEX },
 	{ GE_CMD_TEXADDR0, 0, SoftDirty::SAMPLER_TEXLIST | SoftDirty::BINNER_OVERLAP },
 	{ GE_CMD_TEXADDR1, 0, SoftDirty::SAMPLER_TEXLIST | SoftDirty::BINNER_OVERLAP },
@@ -394,14 +404,44 @@ const SoftwareCommandTableEntry softgpuCommandTable[] = {
 	{ GE_CMD_NOP_FF },
 };
 
+static SoftGPU *g_softGpuInstance = nullptr;
+
+// PS3 frontend: see SoftGPU::TakeNewPicture.
+bool SoftGPUTakeNewPicture() {
+	return g_softGpuInstance && g_softGpuInstance->TakeNewPicture();
+}
+
 SoftGPU::SoftGPU(GraphicsContext *gfxCtx, Draw::DrawContext *draw)
 	: GPUCommon(gfxCtx, draw)
 {
+	g_softGpuInstance = this;
 	fb.data = Memory::GetPointerWriteOrException(0x44000000); // TODO: correct default address?
+#if defined(PPSSPP_PS3_RSX) && !PPSSPP_PLATFORM(PS3)
+	extern void InstallBenchBackendFromEnv();
+	InstallBenchBackendFromEnv();
+#endif
 	depthbuf.vram = Memory::GetPointerWriteOrException(0x04000000);
 	UpdateDepthBuffer();
 
 	memset(softgpuCmdInfo, 0, sizeof(softgpuCmdInfo));
+	memset(softgpuStateCmd, 1, sizeof(softgpuStateCmd));
+	softgpuStateCmd[GE_CMD_NOP] = 0;
+	softgpuStateCmd[GE_CMD_VADDR] = 0;
+	softgpuStateCmd[GE_CMD_IADDR] = 0;
+	softgpuStateCmd[GE_CMD_PRIM] = 0;
+	// Always executed but no draw state of their own; the matrix data and CLUT loads count only
+	// when they change something (Gran Turismo sends the same matrices again for every draw).
+	static const u8 noState[] = {
+		GE_CMD_OFFSETADDR, GE_CMD_ORIGIN, GE_CMD_JUMP, GE_CMD_CALL, GE_CMD_RET, GE_CMD_END, GE_CMD_BJUMP,
+		GE_CMD_BOUNDINGBOX, GE_CMD_BEZIER, GE_CMD_SPLINE, GE_CMD_LOADCLUT, GE_CMD_TEXSYNC,
+		GE_CMD_WORLDMATRIXNUMBER, GE_CMD_WORLDMATRIXDATA, GE_CMD_VIEWMATRIXNUMBER, GE_CMD_VIEWMATRIXDATA,
+		GE_CMD_PROJMATRIXNUMBER, GE_CMD_PROJMATRIXDATA, GE_CMD_TGENMATRIXNUMBER, GE_CMD_TGENMATRIXDATA,
+		GE_CMD_BONEMATRIXNUMBER, GE_CMD_BONEMATRIXDATA,
+		// The LOD mode/bias: hardware backends don't use it (NormalizeForHardware), and only they merge.
+		GE_CMD_TEXLEVEL,
+	};
+	for (u8 c : noState)
+		softgpuStateCmd[c] = 0;
 
 	// Convert the command table to a faster format, and check for dupes.
 	std::set<u8> dupeCheck;
@@ -475,6 +515,10 @@ void SoftGPU::DeviceRestore(Draw::DrawContext *draw) {
 SoftGPU::~SoftGPU() {
 	// The firmware's default, until the next software renderer sets it.
 	Memory::g_depthTranslationIndex = DepthTranslationIndex(0x400);
+	if (g_softGpuInstance == this)
+		g_softGpuInstance = nullptr;
+	// Its thread runs this class's code.
+	StopAsync();
 	if (fbTex) {
 		fbTex->Release();
 		fbTex = nullptr;
@@ -484,11 +528,54 @@ SoftGPU::~SoftGPU() {
 	delete drawEngine_;
 }
 
+#if PPSSPP_PLATFORM(PS3)
+// Lines are collected here and written 64 KB at a time: one write per line (~40 ms each on the
+// PS3's disk) made 3000 lines a two-minute freeze (Frontend 99). Static: no allocation.
+static char g_drawLogBuf[64 * 1024];
+static unsigned g_drawLogUsed = 0;
+static void FlushDrawLog() {
+	if (g_drawLogUsed) {
+		FrontendTraceRaw(g_drawLogBuf, g_drawLogUsed);
+		g_drawLogUsed = 0;
+	}
+}
+#endif
+// PS3 (Frontend 98): a text log of the next draws into launch.log, for a scene where a GE dump
+// can't be had (it needs several MB in one piece). Set by the frontend, counted down per draw.
+std::atomic<int> g_geDrawLogLeft{0};
+
+static void GEDrawLogLine(const char *fmt, ...) {
+	char text[1024];
+	va_list args;
+	va_start(args, fmt);
+	vsnprintf(text, sizeof(text), fmt, args);
+	va_end(args);
+#if PPSSPP_PLATFORM(PS3)
+	size_t n = strlen(text);
+	if (g_drawLogUsed + n + 1 > sizeof(g_drawLogBuf))
+		FlushDrawLog();
+	memcpy(g_drawLogBuf + g_drawLogUsed, text, n);
+	g_drawLogUsed += (unsigned)n;
+	g_drawLogBuf[g_drawLogUsed++] = '\n';
+	// The last line asked for: write out what's left.
+	if (g_geDrawLogLeft.load(std::memory_order_relaxed) <= 0)
+		FlushDrawLog();
+#else
+	fprintf(stderr, "%s\n", text);
+#endif
+}
+
 void SoftGPU::SetDisplayFramebuffer(u32 framebuf, u32 stride, GEBufferFormat format) {
+	// (Only the presentation on this thread reads these; the "don't wait" hack lets the frame's
+	// lists finish meanwhile.)
+	if (!g_geAsyncNoSyncWait)
+		AsyncWait();
 	// Seems like this can point into RAM, but should be VRAM if not in RAM.
 	displayFramebuf_ = (framebuf & 0xFF000000) == 0 ? 0x44000000 | framebuf : framebuf;
 	displayStride_ = stride;
 	displayFormat_ = format;
+	if (g_geDrawLogLeft.load(std::memory_order_relaxed) > 0)
+		GEDrawLogLine("DRAW display %08x stride %d fmt %d", displayFramebuf_, (int)stride, (int)format);
 
 	NotifyDisplay(framebuf, stride, format);
 }
@@ -505,7 +592,7 @@ bool SoftGPU::DarkStalkersStretchActive() const {
 
 // Does the stretch blit we skipped, so screenshots see what the game would have displayed.
 void SoftGPU::GetDarkStalkersDisplay(GPUDebugBuffer &buffer) {
-	const u16 *src = (const u16 *)Memory::GetPointerOrException(DS_SOURCE_ADDR);
+	const u16_le *src = (const u16_le *)Memory::GetPointerOrException(DS_SOURCE_ADDR);
 	const int srcStride = displayStride_ == 0 ? 512 : displayStride_;
 	const int srcX = 64, srcY = 16, srcW = DS_SOURCE_WIDTH, srcH = DS_SOURCE_HEIGHT;
 	// Same rectangles as the game's own blits (see RectangleFastPath).
@@ -513,14 +600,14 @@ void SoftGPU::GetDarkStalkersDisplay(GPUDebugBuffer &buffer) {
 	const int dstW = g_DarkStalkerStretch == DSStretch::Normal ? 384 : 480;
 
 	buffer.Allocate(480, 272, GE_FORMAT_8888);
-	u32 *dst = (u32 *)buffer.GetData();
+	u32_le *dst = (u32_le *)buffer.GetData();
 	for (int y = 0; y < 272; ++y) {
 		float sy = std::clamp((y + 0.5f) * srcH / 272.0f - 0.5f, 0.0f, (float)(srcH - 1));
 		int y0 = (int)sy;
 		int y1 = std::min(y0 + 1, srcH - 1);
 		float fy = sy - y0;
-		const u16 *row0 = src + (srcY + y0) * srcStride + srcX;
-		const u16 *row1 = src + (srcY + y1) * srcStride + srcX;
+		const u16_le *row0 = src + (srcY + y0) * srcStride + srcX;
+		const u16_le *row1 = src + (srcY + y1) * srcStride + srcX;
 		for (int x = 0; x < 480; ++x) {
 			if (x < dstX || x >= dstX + dstW) {
 				dst[y * 480 + x] = 0xFF000000;
@@ -699,12 +786,14 @@ void SoftGPU::CopyToCurrentFboFromDisplayRam(const DisplayLayoutConfig &config, 
 }
 
 void SoftGPU::PrepareCopyDisplayToOutput(const DisplayLayoutConfig &config) {
+	AsyncWait();
 	drawEngine_->transformUnit.Flush(this, "output");
 	// The display always shows 480x272.
 	CopyToCurrentFboFromDisplayRam(config, FB_WIDTH, FB_HEIGHT);
 }
 
 void SoftGPU::CopyDisplayToOutput(const DisplayLayoutConfig &config) {
+	AsyncWait();
 	presentation_->CopyToOutput(config);
 	MarkDirty(displayFramebuf_, displayStride_, 272, displayFormat_, SoftGPUVRAMDirty::CLEAR);
 }
@@ -736,9 +825,17 @@ void SoftGPU::MarkDirty(uint32_t addr, uint32_t stride, uint32_t height, GEBuffe
 }
 
 void SoftGPU::MarkDirty(uint32_t addr, uint32_t bytes, SoftGPUVRAMDirty value) {
+#if PPSSPP_PLATFORM(PS3)
+	// Without frameskip only the new-picture mark (frame counting); otherwise every mark carries it.
+	if (g_Config.iFrameSkip == 0)
+		value = value == SoftGPUVRAMDirty::CLEAR ? value : SoftGPUVRAMDirty::NEW_PICTURE;
+	else if (value != SoftGPUVRAMDirty::CLEAR)
+		value |= SoftGPUVRAMDirty::NEW_PICTURE;
+#else
 	// Only bother tracking if frameskipping.
 	if (g_Config.iFrameSkip == 0)
 		return;
+#endif
 	if (!Memory::IsVRAMAddress(addr) || !Memory::IsVRAMAddress(addr + bytes - 1))
 		return;
 	if (lastDirtyAddr_ == addr && lastDirtySize_ == bytes && lastDirtyValue_ == value)
@@ -749,7 +846,8 @@ void SoftGPU::MarkDirty(uint32_t addr, uint32_t bytes, SoftGPUVRAMDirty value) {
 	if (end > sizeof(vramDirty_)) {
 		end = sizeof(vramDirty_);
 	}
-	if (value == SoftGPUVRAMDirty::CLEAR || value == (SoftGPUVRAMDirty::DIRTY | SoftGPUVRAMDirty::REALLY_DIRTY)) {
+	if (value == SoftGPUVRAMDirty::CLEAR || value == (SoftGPUVRAMDirty::DIRTY | SoftGPUVRAMDirty::REALLY_DIRTY) ||
+		value == (SoftGPUVRAMDirty::DIRTY | SoftGPUVRAMDirty::REALLY_DIRTY | SoftGPUVRAMDirty::NEW_PICTURE)) {
 		memset(vramDirty_ + start, (uint8_t)value, end - start);
 	} else {
 		for (uint32_t i = start; i < end; ++i) {
@@ -823,30 +921,113 @@ void SoftGPU::CheckConfigChanged(const DisplayLayoutConfig &config) {
 
 void SoftGPU::FastRunLoop(DisplayList &list) {
 	PROFILE_THIS_SCOPE("soft_runloop");
+	PS3_PROFILE(geLoop);
 	const auto *cmdInfo = softgpuCmdInfo;
 	int dc = downcount;
 	SoftDirty dirty = dirtyFlags_;
+	uint32_t &serial = Rasterizer::g_geStateSerial;
+#if PPSSPP_ARCH(POWERPC)
+	uint32_t cmds = 0;  // For the perf line: GE commands run, in drawn and in skipped frames.
+#endif
+	// Changes outside this loop change the serial themselves (ExecuteOp, GEState::Restore/Reset,
+	// DoState, ResetMatrices): Gran Turismo has a loop per draw (the CPU moves the stall address on).
 	for (; dc > 0; --dc) {
 		u32 op = Memory::ReadUnchecked_U32(list.pc);
 		const u32 cmd = op >> 24;
+#if PPSSPP_ARCH(POWERPC)
+		cmds++;
+#endif
+		// A run of world matrix data (Gran Turismo sends the same identity matrix again for every
+		// two draws: ~60% of its commands) in one go, as the hardware GPUs' Execute_WorldMtxNum
+		// does: no call per command, the counter kept in a register (Frontend 107).
+#if !PPSSPP_PLATFORM(PS3)
+		static const bool noMtxBatch = getenv("PPSSPP_NO_MTXBATCH") != nullptr;  // Test builds: compare.
+#else
+		constexpr bool noMtxBatch = false;
+#endif
+		if (cmd == GE_CMD_WORLDMATRIXDATA && !debugRecording_ && !noMtxBatch) {
+			u32 num = gstate.worldmtxnum & 0x00FFFFFF;
+			u32 *mtx = (u32 *)gstate.worldMatrix;
+			u32 *visible = &matrixVisible.all[12 * 8];
+			bool changed = false;
+			for (;;) {
+				if (num < 12) {
+					const u32 newVal = op << 8;
+					if (mtx[num] != newVal) {
+						mtx[num] = newVal;
+						changed = true;
+					}
+				}
+				visible[num & 0xF] = op & 0x00FFFFFF;
+				num++;
+				if (dc <= 1)
+					break;
+				const u32 next = Memory::ReadUnchecked_U32(list.pc + 4);
+				if ((next >> 24) != GE_CMD_WORLDMATRIXDATA)
+					break;
+				op = next;
+				list.pc += 4;
+				--dc;
+#if PPSSPP_ARCH(POWERPC)
+				cmds++;
+#endif
+			}
+			gstate.worldmtxnum = (GE_CMD_WORLDMATRIXNUMBER << 24) | (num & 0x00FFFFFF);
+			gstate.worldmtxdata = GE_CMD_WORLDMATRIXDATA << 24;
+			if (changed) {
+				dirty |= SoftDirty::TRANSFORM_MATRIX;
+				serial++;
+				gstate_c.Dirty(DIRTY_WORLD_VIEW_PROJ_MATRIX | DIRTY_VIEW_PROJ_MATRIX | DIRTY_CULL_MATRIX);
+			}
+			list.pc += 4;
+			continue;
+		}
 		const auto &info = cmdInfo[cmd];
 		const u32 diff = op ^ gstate.cmdmem[cmd];
+#if !PPSSPP_PLATFORM(PS3)
+		{
+			static const bool clog = getenv("PPSSPP_CMDLOG") != nullptr;
+			static int lines;
+			static const int clogMax = clog ? atoi(getenv("PPSSPP_CMDLOG")) : 0;
+			if (clog && lines < (clogMax > 1 ? clogMax : 3000) && (lines++, true))
+				fprintf(stderr, "CMD %08x %08x %s\n", list.pc, op, diff ? "chg" : "");
+		}
+#endif
 		if (diff == 0) {
 			if (info.flags & FLAG_EXECUTE) {
+				serial += softgpuStateCmd[cmd];
 				downcount = dc;
 				dirtyFlags_ = dirty;
+#if PPSSPP_ARCH(POWERPC)
+				const uint64_t te = PS3Profile::Now();  // Every handler timed (build 152).
+#endif
 				(this->*info.func)(op, diff);
+#if PPSSPP_ARCH(POWERPC)
+				PS3Profile::geExecCount[cmd]++;
+				PS3Profile::geExecTicks[cmd] += PS3Profile::Now() - te;
+#endif
 				dirty = dirtyFlags_;
 				dc = downcount;
 			}
 		} else {
 			uint64_t flags = info.flags;
 			gstate.cmdmem[cmd] = op;
+			serial += softgpuStateCmd[cmd];
+#if !PPSSPP_PLATFORM(PS3)
+			if (softgpuStateCmd[cmd]) Rasterizer::g_lastSerialCmd = cmd;
+#endif
 			dirty |= SoftDirty(flags >> 8);
 			if (flags & (FLAG_EXECUTE | FLAG_EXECUTEONCHANGE)) {
 				downcount = dc;
 				dirtyFlags_ = dirty;
+#if PPSSPP_ARCH(POWERPC)
+				const uint64_t te = PS3Profile::Now();  // Every handler timed (build 152).
+#endif
 				(this->*info.func)(op, diff);
+#if PPSSPP_ARCH(POWERPC)
+				PS3Profile::geExecCount[cmd]++;
+				PS3Profile::geExecTicks[cmd] += PS3Profile::Now() - te;
+#endif
 				dirty = dirtyFlags_;
 				dc = downcount;
 			}
@@ -855,9 +1036,16 @@ void SoftGPU::FastRunLoop(DisplayList &list) {
 	}
 	downcount = 0;
 	dirtyFlags_ = dirty;
+#if PPSSPP_ARCH(POWERPC)
+	if (gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME)
+		PS3Profile::geCmdsSkipped += cmds;
+	else
+		PS3Profile::geCmds += cmds;
+#endif
 }
 
 void SoftGPU::ExecuteOp(u32 op, u32 diff) {
+	Rasterizer::g_geStateSerial++;
 	const u8 cmd = op >> 24;
 	const auto info = softgpuCmdInfo[cmd];
 	if (diff == 0) {
@@ -871,6 +1059,10 @@ void SoftGPU::ExecuteOp(u32 op, u32 diff) {
 }
 
 void SoftGPU::Execute_BlockTransferStart(u32 op, u32 diff) {
+	PS3_PROFILE(geXfer);
+#if PPSSPP_ARCH(POWERPC)
+	PS3Profile::geXfers++;
+#endif
 	u32 srcBasePtr = gstate.getTransferSrcAddress();
 	u32 srcStride = gstate.getTransferSrcStride();
 
@@ -887,18 +1079,98 @@ void SoftGPU::Execute_BlockTransferStart(u32 op, u32 diff) {
 	int height = gstate.getTransferHeight();
 
 	int bpp = gstate.getTransferBpp();
+	if (g_geDrawLogLeft.load(std::memory_order_relaxed) > 0)
+		GEDrawLogLine("DRAW transfer %08x/%d %d,%d -> %08x/%d %d,%d size %dx%d bpp %d", srcBasePtr, (int)srcStride, srcX, srcY, dstBasePtr, (int)dstStride, dstX, dstY, width, height, bpp);
 
 	// Use height less one to account for width, which can be greater or less than stride.
 	const uint32_t src = srcBasePtr + (srcY * srcStride + srcX) * bpp;
 	const uint32_t srcSize = (height - 1) * (srcStride + width) * bpp;
 	const uint32_t dst = dstBasePtr + (dstY * dstStride + dstX) * bpp;
 	const uint32_t dstSize = (height - 1) * (dstStride + width) * bpp;
+#if !PPSSPP_PLATFORM(PS3)
+	static const bool xferLog = getenv("PPSSPP_XFERLOG") != nullptr;
+	if (xferLog)
+		fprintf(stderr, "XFER %08x -> %08x %dx%d bpp %d\n", src, dst, width, height, bpp);
+#endif
 
-	// Need to flush both source and target, so we overwrite properly.
-	if (Memory::IsDepthTexVRAMAddress(srcBasePtr) || Memory::IsDepthTexVRAMAddress(dstBasePtr)) {
-		// Through the depth layout (CopyBlockTransfer), which the ranges don't follow.
+	// In a frame frameskip doesn't draw, a copy from memory into VRAM that the game makes every frame
+	// is left out too, with the draws. Silent Hill Origins' menu copies each movie picture into its
+	// screen buffer and draws its text over it; the next frame copies that buffer out to show it.
+	// With only the copy done in a skipped frame, the next drawn frame showed a picture without the
+	// text (the text blinked with Frame cap in videos Off). Copies made once are always done.
+	if (Rasterizer::g_hardwareBackend && Memory::IsVRAMAddress(dst) && !Memory::IsVRAMAddress(src)) {
+		const u32 frame = (u32)gpuStats.totals.numFlips;
+		const u32 xferSize = ((u32)width << 16) | ((u32)height << 3) | (u32)bpp;
+		const bool repeated = src == lastXferSrc_ && dst == lastXferDst_ && xferSize == lastXferSize_ && frame - lastXferFrame_ == 1;
+		lastXferSrc_ = src;
+		lastXferDst_ = dst;
+		lastXferSize_ = xferSize;
+		lastXferFrame_ = frame;
+		if (repeated && (gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME) != 0) {
+#if PPSSPP_PLATFORM(PS3)
+			if (skippedXfers_ < 4)
+				FrontendTrace("Frameskip: a copy into VRAM made every frame (%08x -> %08x, %dx%d) left out of a skipped frame", src, dst, width, height);
+#endif
+			skippedXfers_++;
+			return;
+		}
+	}
+	// Textures read from the destination rows need a look; nothing else changed.
+	const uint32_t dstSpan = ((height - 1) * dstStride + width) * bpp;
+	if (Memory::IsValidRange(dst, dstSpan))
+		Rasterizer::NoteGeDirtyRange(dst, dstSpan);
+	else
+		Rasterizer::NoteGeMemoryMayHaveChanged();
+
+	const uint32_t srcSpan = ((height - 1) * srcStride + width) * bpp;
+	// Memory a queued transfer (below) is still to write: this one waits for it.
+	if (Rasterizer::g_hardwareBackend && Rasterizer::AsyncRamWritesQueued() &&
+		(Rasterizer::AsyncRamWritePending(src, srcSpan) || Rasterizer::AsyncRamWritePending(dst, dstSpan)))
+		Rasterizer::g_hardwareBackend->Sync();
+	// From VRAM into main memory: made by the hardware in order with its queued drawing, as the GE
+	// does, instead of waiting here for all of it and writing back what it drew. Silent Hill Origins
+	// copies its light mask out of VRAM every frame: the wait was most of a frame at 2x. The game
+	// learns the GE is done only after the copy (sceGe syncs and interrupts wait for the hardware).
+#if !PPSSPP_PLATFORM(PS3)
+	// Test builds: PPSSPP_NO_ASYNCXFER=1 copies at once as before (to compare).
+	static const bool noAsync = getenv("PPSSPP_NO_ASYNCXFER") != nullptr;
+#else
+	const bool noAsync = false;
+#endif
+	{
+		uint32_t asyncSrc = src;
+		if ((asyncSrc & 0x04800000) == 0x04800000)
+			asyncSrc &= ~0x00800000;
+		if (Rasterizer::g_hardwareBackend && !noAsync && Memory::IsVRAMAddress(asyncSrc) && !Memory::IsVRAMAddress(dst) &&
+			Memory::IsValidRange(asyncSrc, srcSpan) && Memory::IsValidRange(dst, dstSpan) && !recorder_.IsActive() && !recorder_.IsActivePending() &&
+			Rasterizer::g_hardwareBackend->QueueTransferToRam(asyncSrc, srcStride * bpp, dst, dstStride * bpp, width * bpp, height)) {
+			Rasterizer::NoteAsyncRamWrite(dst, dstSpan);
+			gpuStats.perFrame.numBlockTransfers++;
+			return;
+		}
+	}
+
+	// A copy from memory nothing has drawn into a buffer the hardware draws into: the hardware takes
+	// the copied rectangle from PSP memory afterwards, in order with its queued draws, instead of
+	// first writing back every buffer it drew (Silent Hill Origins' menu copies each movie picture
+	// over its screen like this: ~14 ms a frame of write-backs at 2x, more at 3x).
+	// (Rectangles starting on a 64-byte column, as the hardware copies them in.)
+#if !PPSSPP_PLATFORM(PS3)
+	// Test builds: PPSSPP_NO_TAKEROWS=1 writes back first as before (to compare).
+	static const bool noTakeRows = getenv("PPSSPP_NO_TAKEROWS") != nullptr;
+#else
+	const bool noTakeRows = false;
+#endif
+	const bool takeRows = Rasterizer::g_hardwareBackend && !noTakeRows && (dstX * bpp) % 64 == 0 &&
+		Memory::IsValidRange(src, srcSize) && Memory::IsValidRange(dst, dstSize) &&
+		!drawEngine_->transformUnit.HasPendingWrite(src, srcStride * bpp, width * bpp, height) &&
+		Rasterizer::g_hardwareBackend->CanTakeCpuRows(dst, dstStride * bpp, width * bpp, height);
+	if (takeRows) {
+		// Nothing to write back; the hardware's own copy has the queued draws.
+	} else if (Memory::IsDepthTexVRAMAddress(srcBasePtr) || Memory::IsDepthTexVRAMAddress(dstBasePtr)) {
 		drawEngine_->transformUnit.Flush(this, "blockxfer_depth");
 	} else if (Memory::IsValidRange(src, srcSize) && Memory::IsValidRange(dst, dstSize)) {
+		// Need to flush both source and target, so we overwrite properly.
 		drawEngine_->transformUnit.FlushIfOverlap(this, "blockxfer", false, src, srcStride * bpp, width * bpp, height);
 		drawEngine_->transformUnit.FlushIfOverlap(this, "blockxfer", true, dst, dstStride * bpp, width * bpp, height);
 	} else {
@@ -907,8 +1179,143 @@ void SoftGPU::Execute_BlockTransferStart(u32 op, u32 diff) {
 
 	DoBlockTransfer(gstate_c.skipDrawReason);
 
-	// Could theoretically dirty the framebuffer.
-	MarkDirty(dst, dstSize, SoftGPUVRAMDirty::DIRTY | SoftGPUVRAMDirty::REALLY_DIRTY);
+	// Could theoretically dirty the framebuffer. In a frame auto frameskip doesn't draw, not a picture
+	// to show: the frame's draws are skipped, and a screen made of a copy plus draws (Silent Hill
+	// Origins' menu: the movie picture, then its text) was shown without the text.
+	MarkDirty(dst, dstSize, (gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME) != 0 ? SoftGPUVRAMDirty::DIRTY : SoftGPUVRAMDirty::DIRTY | SoftGPUVRAMDirty::REALLY_DIRTY);
+	if (takeRows)
+		Rasterizer::g_hardwareBackend->TakeCpuRows(dst, dstStride * bpp, width * bpp, height);
+}
+
+bool SoftGPU::TakeNewPicture() {
+	return ClearDirty(displayFramebuf_, displayStride_, 272, displayFormat_, SoftGPUVRAMDirty::NEW_PICTURE);
+}
+
+bool SoftGPU::FrameSkipCoversTarget() {
+	const u32 fb = gstate.getFrameBufAddress();
+	if (!Memory::IsVRAMAddress(fb))
+		return true;
+	const u32 off = fb & 0x001FFFFF;
+	// Game frames (flips after drawing; skipped frames count too).
+	const u32 frame = (u32)gpuStats.totals.numFlips + 1;
+	if (frame != displayChanges_)
+		displayChanges_ = frame;
+	// Called for every draw: the same target as the last one in the same frame is answered at once.
+	if (off == lastTargetOff_ && displayChanges_ == lastTargetFrame_)
+		return lastTargetCovered_;
+	lastTargetOff_ = off;
+	lastTargetFrame_ = displayChanges_;
+	// Skipped only if the game drew into this buffer in an earlier frame too (a few frames back at
+	// most): the screens it draws every frame (Killzone and Midnight Club draw their scene in one
+	// buffer and copy it to the shown one). A buffer drawn once, or again after a while (a menu
+	// background, a loading screen), is drawn.
+	TargetSeen *slot = nullptr;
+	for (TargetSeen &t : targetsSeen_) {
+		if (t.off == off && t.frame != 0) {
+			slot = &t;
+			break;
+		}
+	}
+	if (!slot) {
+		slot = &targetsSeen_[0];
+		for (TargetSeen &t : targetsSeen_) {
+			if (t.frame < slot->frame)
+				slot = &t;
+		}
+		slot->off = off;
+		slot->frame = 0;
+		slot->prevFrame = 0;
+	}
+	const bool recent = slot->frame != 0 && displayChanges_ - slot->frame <= 4;
+	if (slot->frame != displayChanges_)
+		slot->prevFrame = slot->frame;
+	slot->frame = displayChanges_;
+	// Drawn in an earlier frame, not only earlier in this one.
+	lastTargetCovered_ = recent && slot->prevFrame != 0 && displayChanges_ - slot->prevFrame <= 4;
+	return lastTargetCovered_;
+}
+
+// Set by the PS3 frontend ("Skip keeps menus", experimental, off by default; works on top of the
+// Frameskip setting): fixed Gran Turismo's menus with frameskip on, broke something in Silent
+// Hill Origins.
+bool g_frameSkipKeepOneOff = false;
+
+// A skipped frame (frameskip) still draws into buffers the game doesn't show directly: render
+// targets it uses as textures later, or a screen it draws once and keeps (Gran Turismo's menus
+// and loading screens had glitches with frameskip on, none with it off).
+struct FrameSkipScope {
+	explicit FrameSkipScope(SoftGPU *gpu) {
+		if (!g_frameSkipKeepOneOff)
+			return;
+		// Asked for every draw, skipped frame or not, so it knows which buffers are drawn every frame.
+		const bool covered = gpu->FrameSkipCoversTarget();
+		if ((gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME) && !covered) {
+			gstate_c.skipDrawReason &= ~SKIPDRAW_SKIPFRAME;
+			restore_ = true;
+		}
+	}
+	~FrameSkipScope() {
+		if (restore_)
+			gstate_c.skipDrawReason |= SKIPDRAW_SKIPFRAME;
+	}
+	bool restore_ = false;
+};
+
+// Store watch (diagnostics, IR interpreter, PS3 "storewatch=1"): a 3D draw with 8888 vertex colours
+// of which many have only their low 16 bits set (Call of Duty's rainbow walls) - which code wrote
+// those colours, from the IR interpreter's log of recent 16-bit and unaligned stores.
+void (*g_storeWatchReport)(const char *text) = nullptr;
+
+static void CheckHalfWrittenColors(u32 vaddr, const u8 *verts, int size, int coloff, u32 vertType, u32 count) {
+	static int reports = 0;
+	if (reports >= 16 || !g_storeWatchReport || !MIPSComp::g_irStoreRing)
+		return;
+	const u32 n = std::min<u32>(count, 64);
+	int lowOnly = 0;
+	for (u32 i = 0; i < n; ++i) {
+		const u8 *cp = verts + i * size + coloff;
+		const u32 c = (u32)cp[0] | ((u32)cp[1] << 8) | ((u32)cp[2] << 16) | ((u32)cp[3] << 24);
+		if ((c & 0xFFFF0000) == 0 && (c & 0xFFFF) != 0)
+			lowOnly++;
+	}
+	if (lowOnly < 8)
+		return;
+	reports++;
+	char line[256];
+	snprintf(line, sizeof(line), "Store watch #%d: draw of %u vertices at %08x (vtype %06x, stride %d, colour at +%d): %d of the first %u colours have only 16 bits",
+		reports, count, vaddr, vertType & 0xFFFFFF, size, coloff, lowOnly, n);
+	g_storeWatchReport(line);
+	u32 blocks[8];
+	int nblocks = 0, found = 0, shown = 0;
+	for (u32 i = 0; i < n; ++i) {
+		const u32 ca = (vaddr + i * size + coloff) & 0x3FFFFFFF;
+		for (u32 k = 0; k < MIPSComp::STORE_WATCH_RING; ++k) {
+			const MIPSComp::StoreWatchRec &r = MIPSComp::g_irStoreRing[(MIPSComp::g_irStoreRingPos - 1 - k) & (MIPSComp::STORE_WATCH_RING - 1)];
+			if (r.kind == 0)
+				break;
+			if (r.addr >= ca && r.addr < ca + 4) {
+				found++;
+				bool known = false;
+				for (int b = 0; b < nblocks; ++b)
+					known = known || blocks[b] == r.block;
+				if (!known && nblocks < 8)
+					blocks[nblocks++] = r.block;
+				if (shown < 6) {
+					shown++;
+					snprintf(line, sizeof(line), "Store watch #%d:   colour of vertex %u (%08x) written by block %08x: %s %08x at %08x", reports, i, ca, r.block,
+						r.kind == 2 ? "sh" : (r.kind == 'L' ? "swl" : "swr"), r.value, r.addr);
+					g_storeWatchReport(line);
+				}
+				break;
+			}
+		}
+	}
+	snprintf(line, sizeof(line), "Store watch #%d:   %d of %u colours found in the last %u 16-bit/unaligned stores, from %d block(s)", reports, found, n, MIPSComp::STORE_WATCH_RING, nblocks);
+	g_storeWatchReport(line);
+	for (int b = 0; b < nblocks; ++b) {
+		snprintf(line, sizeof(line), "@block %08x", blocks[b]);
+		g_storeWatchReport(line);  // The frontend lists the block's code for lines starting with @block.
+	}
 }
 
 // A block transfer from or to VRAM's 0x04200000 or 0x04600000 mirror goes through the depth layout there, as the
@@ -953,6 +1360,27 @@ bool SoftGPU::CopyBlockTransfer(u32 srcBasePtr, u32 srcStride, int srcX, int src
 }
 
 void SoftGPU::Execute_Prim(u32 op, u32 diff) {
+	PS3_PROFILE_SAMPLED(gePrim);
+	FrameSkipScope skipScope(this);
+#if PPSSPP_ARCH(POWERPC)
+	PS3Profile::gePrims++;
+#endif
+#if !PPSSPP_PLATFORM(PS3)
+	{
+		// Test builds: PPSSPP_PRIMSTATE=1 prints the matrix state each draw sees (to compare builds).
+		static const bool primState = getenv("PPSSPP_PRIMSTATE") != nullptr;
+		if (primState) {
+			static uint32_t lastSerial = 0;
+			uint32_t h = 2166136261u;
+			auto mix = [&](const void *p, size_t n) { const u8 *b = (const u8 *)p; for (size_t i = 0; i < n; ++i) h = (h ^ b[i]) * 16777619u; };
+			mix(gstate.worldMatrix, sizeof(gstate.worldMatrix));
+			mix(&matrixVisible.all[12 * 8], 16 * 4);
+			fprintf(stderr, "PRIMSTATE %08x num %08x data %08x serialChanged %d xform %d\n", h, gstate.worldmtxnum, gstate.worldmtxdata,
+				Rasterizer::g_geStateSerial != lastSerial, (dirtyFlags_ & SoftDirty::TRANSFORM_MATRIX) ? 1 : 0);
+			lastSerial = Rasterizer::g_geStateSerial;
+		}
+	}
+#endif
 	u32 count = op & 0xFFFF;
 	// Upper bits are ignored.
 	GEPrimitiveType prim = static_cast<GEPrimitiveType>((op >> 16) & 7);
@@ -965,10 +1393,21 @@ void SoftGPU::Execute_Prim(u32 op, u32 diff) {
 		return;
 	}
 
+	const u32 vertType = gstate.vertType;
+	if (Rasterizer::AsyncRamWritesQueued()) {
+		// Vertices or indices a queued block transfer is still to write.
+		const u32 vsize = drawEngine_->FindVertexDecoder(vertType)->VertexSize();
+		const u32 idxType = vertType & GE_VTYPE_IDX_MASK;
+		const u32 isize = idxType == GE_VTYPE_IDX_8BIT ? 1 : idxType == GE_VTYPE_IDX_16BIT ? 2 : 4;
+		const u32 vbytes = vsize * (idxType == GE_VTYPE_IDX_NONE ? count : 65536);
+		if (Rasterizer::AsyncRamWritePending(gstate_c.vertexAddr, vbytes) ||
+			(idxType != GE_VTYPE_IDX_NONE && Rasterizer::AsyncRamWritePending(gstate_c.indexAddr, isize * count)))
+			Rasterizer::g_hardwareBackend->Sync();
+	}
+
 	const void *verts = Memory::GetPointerUnchecked(gstate_c.vertexAddr);
 	const void *indices = NULL;
 
-	const u32 vertType = gstate.vertType;
 	if ((vertType & GE_VTYPE_IDX_MASK) != GE_VTYPE_IDX_NONE) {
 		if (!Memory::IsValidAddress(gstate_c.indexAddr)) {
 			ERROR_LOG_REPORT(Log::G3D, "Software: Bad index address %08x!", gstate_c.indexAddr);
@@ -976,7 +1415,184 @@ void SoftGPU::Execute_Prim(u32 op, u32 diff) {
 		}
 		indices = Memory::GetPointerUnchecked(gstate_c.indexAddr);
 	}
+	if (MIPSComp::g_irStoreWatch && g_storeWatchReport && !gstate.isModeThrough() && ((vertType >> 2) & 7) == 7) {
+		VertexDecoder *dec = drawEngine_->FindVertexDecoder(vertType);
+		CheckHalfWrittenColors(gstate_c.vertexAddr, (const u8 *)verts, dec->VertexSize(), dec->coloff, vertType, count);
+	}
 
+#if !PPSSPP_PLATFORM(PS3)
+	// Test builds: PPSSPP_DRAWLOG=1 logs each draw's state (for comparing GE dumps with the PS3).
+	static const bool drawLogEnv = getenv("PPSSPP_DRAWLOG") != nullptr;
+#else
+	const bool drawLogEnv = false;
+#endif
+	// The PS3 build too, for the draws the frontend asked for (g_geDrawLogLeft).
+	const bool drawLog = drawLogEnv || (g_geDrawLogLeft.load(std::memory_order_relaxed) > 0 && g_geDrawLogLeft.fetch_sub(1) > 0);
+	if (drawLog) {
+		GEDrawLogLine("DRAW prim %d n %u vtype %06x thru %d fb %08x/%d fmt %d tex %d addr %08x fmt %d %dx%d bufw %d swz %d clut %08x cfmt %06x texfunc %06x blend %d %06x alphatest %06x ztest %d zfunc %d zmask %d colormask %08x/%02x stencil %d fog %d light %d texmap %06x zb %08x/%d dith %d uv %06x %06x %06x %06x matamb %08x matupd %d texenv %06x minz %04x maxz %04x vp %06x %06x fix %06x %06x stest %06x sop %06x lmode %d",
+			(int)prim, count, vertType & 0xFFFFFF, gstate.isModeThrough() ? 1 : 0, gstate.getFrameBufAddress(), gstate.FrameBufStride(), (int)gstate.FrameBufFormat(),
+			gstate.isTextureMapEnabled() ? 1 : 0, gstate.getTextureAddress(0), (int)gstate.getTextureFormat(), gstate.getTextureWidth(0), gstate.getTextureHeight(0),
+			GetTextureBufw(0, gstate.getTextureAddress(0), gstate.getTextureFormat()), gstate.isTextureSwizzled() ? 1 : 0, gstate.getClutAddress(), gstate.clutformat & 0xFFFFFF,
+			gstate.texfunc & 0xFFFFFF, gstate.isAlphaBlendEnabled() ? 1 : 0, gstate.blend & 0xFFFFFF, gstate.alphatest & 0xFFFFFF, gstate.isDepthTestEnabled() ? 1 : 0,
+			(int)gstate.getDepthTestFunction(), gstate.isDepthWriteEnabled() ? 1 : 0, gstate.pmskc & 0xFFFFFF, gstate.pmska & 0xFF, gstate.isStencilTestEnabled() ? 1 : 0,
+			gstate.isFogEnabled() ? 1 : 0, gstate.isLightingEnabled() ? 1 : 0, gstate.texmapmode & 0xFFFFFF,
+			gstate.getDepthBufAddress(), gstate.DepthBufStride(), gstate.isDitherEnabled() ? 1 : 0,
+			gstate.texscaleu & 0xFFFFFF, gstate.texscalev & 0xFFFFFF, gstate.texoffsetu & 0xFFFFFF, gstate.texoffsetv & 0xFFFFFF, gstate.getMaterialAmbientRGBA(), gstate.getMaterialUpdate(), gstate.texenvcolor & 0xFFFFFF, gstate.minz & 0xFFFF, gstate.maxz & 0xFFFF, gstate.viewportzscale & 0xFFFFFF, gstate.viewportzcenter & 0xFFFFFF,
+			gstate.getFixA(), gstate.getFixB(), gstate.stenciltest & 0xFFFFFF, gstate.stencilop & 0xFFFFFF, (int)(gstate.lmode & 1));
+		GEDrawLogLine("  vaddr %08x iaddr %08x", gstate_c.vertexAddr, indices ? gstate_c.indexAddr : 0);
+		if (getenv("PPSSPP_DRAWCOLS") && ((vertType >> 2) & 7) == 7) {
+			VertexDecoder *dec = drawEngine_->FindVertexDecoder(vertType);
+			const int size = dec->VertexSize();
+			int maxIdx = 0;
+			for (u32 i = 0; i < count; ++i) { int ix = indices ? (((vertType >> 11) & 3) == 2 ? ((const u16 *)indices)[i] : ((const u8 *)indices)[i]) : i; maxIdx = std::max(maxIdx, ix); }
+			std::string line;
+			for (int i = 0; i <= maxIdx; ++i) {
+				const u8 *v = (const u8 *)verts + i * size;
+				char buf[96];
+				snprintf(buf, sizeof(buf), " %08x", *(const u32 *)(v + dec->coloff));
+				line += buf;
+				if ((i & 15) == 15 || i == maxIdx) { GEDrawLogLine("  cols%s", line.c_str()); line.clear(); }
+			}
+			std::string raw;
+			for (int i = 0; i <= std::min(maxIdx, 3); ++i) { for (int b = 0; b < size; ++b) { char buf[4]; snprintf(buf, 4, "%02x", ((const u8 *)verts)[i * size + b]); raw += buf; } raw += " "; }
+			GEDrawLogLine("  size %d coloff %d raw %s", size, dec->coloff, raw.c_str());
+		}
+	}
+#if !PPSSPP_PLATFORM(PS3)
+	// PPSSPP_DRAWVERTS=1 (with PPSSPP_DRAWLOG): the first vertices of through-mode draws, decoded.
+	static const bool drawVerts = getenv("PPSSPP_DRAWVERTS") != nullptr;
+	if (drawLog && drawVerts && gstate.isModeThrough() && !indices) {
+		VertexDecoder *dec = drawEngine_->FindVertexDecoder(vertType);
+		const int size = dec->VertexSize();
+		const int tcFmt = vertType & 3, colFmt = (vertType >> 2) & 7, posFmt = (vertType >> 7) & 3;
+		static const int maxVerts = getenv("PPSSPP_DRAWVERTS") ? std::max(4, atoi(getenv("PPSSPP_DRAWVERTS"))) : 4;
+		for (u32 i = 0; i < count && (int)i < maxVerts; ++i) {
+			const u8 *v = (const u8 *)verts + i * size;
+			int off = 0;
+			float uvx = 0, uvy = 0;
+			auto align = [&](int a) { off = (off + a - 1) & ~(a - 1); };
+			if (tcFmt == 1) { uvx = v[off]; uvy = v[off + 1]; off += 2; }
+			else if (tcFmt == 2) { align(2); uvx = *(const s16 *)(v + off); uvy = *(const s16 *)(v + off + 2); off += 4; }
+			else if (tcFmt == 3) { align(4); uvx = *(const float *)(v + off); uvy = *(const float *)(v + off + 4); off += 8; }
+			u32 col = 0;
+			if (colFmt >= 4 && colFmt <= 6) { align(2); col = *(const u16 *)(v + off); off += 2; }
+			else if (colFmt == 7) { align(4); col = *(const u32 *)(v + off); off += 4; }
+			float x = 0, y = 0, z = 0;
+			if (posFmt == 2) { align(2); x = *(const s16 *)(v + off); y = *(const s16 *)(v + off + 2); z = *(const u16 *)(v + off + 4); }
+			else if (posFmt == 3) { align(4); x = *(const float *)(v + off); y = *(const float *)(v + off + 4); z = *(const float *)(v + off + 8); }
+			fprintf(stderr, "  VERT %u: pos %.1f %.1f %.0f uv %.1f %.1f col %08x\n", i, x, y, z, uvx, uvy, col);
+		}
+	}
+	// Non-through float positions: clip-space coordinates (world, view and projection applied).
+	if (drawLog && drawVerts && !gstate.isModeThrough() && !indices && ((vertType >> 7) & 3) == 3 && !(vertType & GE_VTYPE_WEIGHT_MASK) && !(vertType & GE_VTYPE_MORPHCOUNT_MASK)) {
+		VertexDecoder *dec = drawEngine_->FindVertexDecoder(vertType);
+		const int size = dec->VertexSize();
+		static const int maxVerts = std::max(4, atoi(getenv("PPSSPP_DRAWVERTS")));
+		for (u32 i = 0; i < count && (int)i < maxVerts; ++i) {
+			const float *p = (const float *)((const u8 *)verts + i * size + dec->posoff);
+			float wv[3], vv[3], c[4];
+			const float *m = gstate.worldMatrix, *v = gstate.viewMatrix, *pr = gstate.projMatrix;
+			for (int k = 0; k < 3; ++k) wv[k] = m[k] * p[0] + m[3 + k] * p[1] + m[6 + k] * p[2] + m[9 + k];
+			for (int k = 0; k < 3; ++k) vv[k] = v[k] * wv[0] + v[3 + k] * wv[1] + v[6 + k] * wv[2] + v[9 + k];
+			for (int k = 0; k < 4; ++k) c[k] = pr[k] * vv[0] + pr[4 + k] * vv[1] + pr[8 + k] * vv[2] + pr[12 + k];
+			fprintf(stderr, "  VERT %u: pos %g %g %g clip %g %g %g w %g\n", i, p[0], p[1], p[2], c[0], c[1], c[2], c[3]);
+		}
+	}
+	// PPSSPP_DEPTHHIST=N: the depth buffer's most common values before draw N.
+	static const int depthHistAt = getenv("PPSSPP_DEPTHHIST") ? atoi(getenv("PPSSPP_DEPTHHIST")) : 0;
+	static int drawNum = 0;
+	if (depthHistAt && ++drawNum == depthHistAt) {
+		drawEngine_->transformUnit.Flush(this, "debug");
+		const u16 *zb = (const u16 *)Memory::GetPointerUnchecked(gstate.getDepthBufAddress() & 0x041FFFFF);
+		std::map<int, int> hist;
+		for (int y = 0; y < 272; ++y)
+			for (int x = 0; x < 480; ++x)
+				hist[zb[y * gstate.DepthBufStride() + x]]++;
+		std::vector<std::pair<int, int>> v;
+		for (auto &h : hist) v.push_back({h.second, h.first});
+		std::sort(v.rbegin(), v.rend());
+		for (size_t i = 0; i < v.size() && i < 8; ++i)
+			fprintf(stderr, "DEPTH value %04x: %d pixels\n", v[i].second, v[i].first);
+	}
+	// PPSSPP_TEXDUMP=<dir>: each texture (address + CLUT) a draw uses, as a PPM over a checkerboard.
+	static const char *texDumpDir = getenv("PPSSPP_TEXDUMP");
+	if (texDumpDir && gstate.isTextureMapEnabled()) {
+		static std::set<std::pair<u32, u32>> seen;
+		const u32 taddr = gstate.getTextureAddress(0), caddr = gstate.getClutAddress();
+		if (seen.insert({ taddr, caddr }).second) {
+			drawEngine_->transformUnit.Flush(this, "texdump");
+			{
+				const u32 *c = (const u32 *)clut;
+				fprintf(stderr, "TEX %08x fmt %d clut %08x cfmt %06x clut[0..15]:", taddr, (int)gstate.getTextureFormat(), caddr, gstate.clutformat & 0xFFFFFF);
+				for (int i = 0; i < 16; ++i) fprintf(stderr, " %08x", c[i]);
+				const u8 *t = Memory::GetPointerUnchecked(taddr);
+				int hist[16]{};
+				for (int i = 0; i < 4096 && Memory::IsValidRange(taddr + i, 1); ++i) { hist[t[i] & 15]++; hist[t[i] >> 4]++; }
+				fprintf(stderr, "\n    nibble histogram (first 4 KB):");
+				for (int i = 0; i < 16; ++i) fprintf(stderr, " %d", hist[i]);
+				fprintf(stderr, "\n");
+			}
+			GPUDebugBuffer buf;
+			if (Rasterizer::GetCurrentTexture(buf, 0)) {
+				char name[512];
+				snprintf(name, sizeof(name), "%s/tex_%08x_clut_%08x_fmt%d.ppm", texDumpDir, taddr, caddr, (int)gstate.getTextureFormat());
+				FILE *f = fopen(name, "wb");
+				if (f) {
+					const int w = buf.GetStride(), h = buf.GetHeight();
+					fprintf(f, "P6\n%d %d\n255\n", w, h);
+					const u8 *px = buf.GetData();
+					for (int y = 0; y < h; ++y)
+						for (int x = 0; x < w; ++x) {
+							const u8 *p = px + (y * w + x) * 4;
+							const int bg = ((x >> 3) ^ (y >> 3)) & 1 ? 160 : 96;
+							for (int c = 0; c < 3; ++c)
+								fputc((p[c] * p[3] + bg * (255 - p[3])) / 255, f);
+						}
+					fclose(f);
+				}
+			}
+		}
+	}
+#endif
+	cyclesExecuted += EstimatePerVertexCost() * count;
+	PublishAsyncProgress();
+	// A frame auto frameskip doesn't draw (4 of 5 when the game runs slow): only move the vertex
+	// or index address on, as SubmitPrimitive would, without the decoder lookup and the rest.
+	if ((gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME) && !gstate.isModeThrough()) {
+#if PPSSPP_ARCH(POWERPC)
+		PS3_PROFILE_SAMPLED(geSkipT);
+		PS3Profile::geSkips++;
+#endif
+		int bytesRead = 0;
+		if ((vertType & GE_VTYPE_IDX_MASK) == GE_VTYPE_IDX_NONE) {
+			static u32 lastType = 0xFFFFFFFF;
+			static int lastSize = 0;
+			if (vertType != lastType) {
+				lastSize = drawEngine_->FindVertexDecoder(vertType)->VertexSize();
+				lastType = vertType;
+			}
+			bytesRead = count * lastSize;
+		}
+		MarkDirty(gstate.getFrameBufAddress(), gstate.FrameBufStride(), gstate.getRegionY2() + 1, gstate.FrameBufFormat(), SoftGPUVRAMDirty::DIRTY);
+		gstate_c.AdvanceVerts(vertType, count, bytesRead);
+		return;
+	}
+	// Only new vertices for the open hardware T&L job (Gran Turismo: ~50,000 draws a frame).
+	{
+#if PPSSPP_ARCH(POWERPC)
+		PS3_PROFILE_SAMPLED(geFastMerge);
+#endif
+		int bytesRead;
+		if (drawEngine_->transformUnit.FastMergePrim(verts, indices, prim, count, vertType, &bytesRead)) {
+#if PPSSPP_ARCH(POWERPC)
+			PS3Profile::geFastMerges++;
+#endif
+			MarkDirty(gstate.getFrameBufAddress(), gstate.FrameBufStride(), gstate.getRegionY2() + 1, gstate.FrameBufFormat(),
+				(gstate_c.skipDrawReason & SKIPDRAW_SKIPFRAME) != 0 ? SoftGPUVRAMDirty::DIRTY : SoftGPUVRAMDirty::DIRTY | SoftGPUVRAMDirty::REALLY_DIRTY);
+			gstate_c.AdvanceVerts(vertType, count, bytesRead);
+			return;
+		}
+	}
 	if (gstate.isModeThrough()) {
 		cyclesExecuted += EstimateFillCycles(prim, verts, indices, count, drawEngine_->FindVertexDecoder(vertType), vertType);
 	}
@@ -1034,11 +1650,15 @@ int SoftGPU::RunVertexCount(u32 count, u32 vertexSize) {
 }
 
 void SoftGPU::Execute_Bezier(u32 op, u32 diff) {
+	FrameSkipScope skipScope(this);
 	// This also make skipping drawing very effective.
 	if (gstate_c.skipDrawReason & (SKIPDRAW_SKIPFRAME | SKIPDRAW_NON_DISPLAYED_FB)) {
 		// TODO: Should this eat some cycles?  Probably yes.  Not sure if important.
 		return;
 	}
+	// Control points a queued block transfer may still be writing.
+	if (Rasterizer::AsyncRamWritesQueued())
+		Rasterizer::g_hardwareBackend->Sync();
 
 	if (!Memory::IsValidAddress(gstate_c.vertexAddr)) {
 		ERROR_LOG_REPORT(Log::G3D, "Bad vertex address %08x!", gstate_c.vertexAddr);
@@ -1087,11 +1707,15 @@ void SoftGPU::Execute_Bezier(u32 op, u32 diff) {
 }
 
 void SoftGPU::Execute_Spline(u32 op, u32 diff) {
+	FrameSkipScope skipScope(this);
 	// This also make skipping drawing very effective.
 	if (gstate_c.skipDrawReason & (SKIPDRAW_SKIPFRAME | SKIPDRAW_NON_DISPLAYED_FB)) {
 		// TODO: Should this eat some cycles?  Probably yes.  Not sure if important.
 		return;
 	}
+	// Control points a queued block transfer may still be writing.
+	if (Rasterizer::AsyncRamWritesQueued())
+		Rasterizer::g_hardwareBackend->Sync();
 
 	if (!Memory::IsValidAddress(gstate_c.vertexAddr)) {
 		ERROR_LOG_REPORT(Log::G3D, "Bad vertex address %08x!", gstate_c.vertexAddr);
@@ -1150,6 +1774,8 @@ void SoftGPU::Execute_LoadClut(u32 op, u32 diff) {
 
 	// Might be copying drawing into the CLUT, so flush.
 	drawEngine_->transformUnit.FlushIfOverlap(this, "loadclut", false, clutAddr, clutTotalBytes, clutTotalBytes, 1);
+	if (Rasterizer::AsyncRamWritesQueued() && Rasterizer::AsyncRamWritePending(clutAddr, clutTotalBytes))
+		Rasterizer::g_hardwareBackend->Sync();
 
 	bool changed = false;
 	if (Memory::IsValidAddress(clutAddr)) {
@@ -1169,9 +1795,14 @@ void SoftGPU::Execute_LoadClut(u32 op, u32 diff) {
 		changed = true;
 	}
 
-	if (changed)
+	if (changed) {
 		drawEngine_->transformUnit.NotifyClutUpdate(clut);
-	dirtyFlags_ |= SoftDirty::SAMPLER_CLUT;
+		Rasterizer::g_geStateSerial++;
+		// Only a palette that changed makes a new draw state. Midnight Club L.A. loads the same
+		// palette again before nearly every draw (~5,000 a frame): each one made the next draw
+		// compute a whole new state, and kept it from joining the draw before (Build 139).
+		dirtyFlags_ |= SoftDirty::SAMPLER_CLUT;
+	}
 }
 
 void SoftGPU::Execute_FramebufPtr(u32 op, u32 diff) {
@@ -1275,6 +1906,7 @@ void SoftGPU::Execute_WorldMtxData(u32 op, u32 diff) {
 		if (newVal != *target) {
 			*target = newVal;
 			dirtyFlags_ |= SoftDirty::TRANSFORM_MATRIX;
+			Rasterizer::g_geStateSerial++;
 			gstate_c.Dirty(DIRTY_WORLD_VIEW_PROJ_MATRIX | DIRTY_VIEW_PROJ_MATRIX | DIRTY_CULL_MATRIX);
 		}
 	}
@@ -1296,7 +1928,23 @@ void SoftGPU::Execute_ViewMtxData(u32 op, u32 diff) {
 		if (newVal != *target) {
 			*target = newVal;
 			dirtyFlags_ |= SoftDirty::TRANSFORM_MATRIX;
+			Rasterizer::g_geStateSerial++;
 			gstate_c.Dirty(DIRTY_WORLD_VIEW_PROJ_MATRIX | DIRTY_VIEW_PROJ_MATRIX | DIRTY_CULL_MATRIX);
+			// A NaN or infinite camera (Dead to Rights: the view only shows the sky, the game can't
+			// be played on): say when it starts, for tracking down where it came from.
+			if ((newVal & 0x7F800000) == 0x7F800000) {
+				static int reported = 0;
+				if (reported < 3) {
+					reported++;
+					ERROR_LOG(Log::G3D, "View matrix element %d is NaN/infinite (%08x), PSP pc %08x ra %08x", num, newVal,
+						currentMIPS ? currentMIPS->pc : 0, currentMIPS ? currentMIPS->r[MIPS_REG_RA] : 0);
+#if PPSSPP_PLATFORM(PS3)
+					if (g_frontendNaNCameraHook) {
+						g_frontendNaNCameraHook(num, newVal);
+					}
+#endif
+				}
+			}
 		}
 	}
 
@@ -1317,6 +1965,7 @@ void SoftGPU::Execute_ProjMtxData(u32 op, u32 diff) {
 		if (newVal != *target) {
 			*target = newVal;
 			dirtyFlags_ |= SoftDirty::TRANSFORM_MATRIX;
+			Rasterizer::g_geStateSerial++;
 			gstate_c.Dirty(DIRTY_WORLD_VIEW_PROJ_MATRIX | DIRTY_VIEW_PROJ_MATRIX);
 		}
 	}
@@ -1339,6 +1988,7 @@ void SoftGPU::Execute_TgenMtxData(u32 op, u32 diff) {
 			*target = newVal;
 			// TransformState keeps its rows, and it also affects if we enable texture projection.
 			dirtyFlags_ |= SoftDirty::TRANSFORM_MATRIX | SoftDirty::RAST_TEX;
+			Rasterizer::g_geStateSerial++;
 		}
 	}
 
@@ -1359,7 +2009,10 @@ void SoftGPU::Execute_BoneMtxData(u32 op, u32 diff) {
 		u32 *target = (u32 *)&gstate.boneMatrix[num];
 		u32 newVal = op << 8;
 		// No dirtying, we read bone data during vertex read.
-		*target = newVal;
+		if (newVal != *target) {
+			*target = newVal;
+			Rasterizer::g_geStateSerial++;
+		}
 	}
 
 	// Also update the CPU visible values, which update differently.
@@ -1378,6 +2031,7 @@ static void CopyMatrix24(u32_le *result, const u32 *mtx, u32 count, u32 cmdbits)
 }
 
 bool SoftGPU::GetMatrix24(GEMatrixType type, u32_le *result, u32 cmdbits) {
+	AsyncWait();
 	switch (type) {
 	case GE_MTX_BONE0:
 	case GE_MTX_BONE1:
@@ -1408,6 +2062,8 @@ bool SoftGPU::GetMatrix24(GEMatrixType type, u32_le *result, u32 cmdbits) {
 }
 
 void SoftGPU::ResetMatrices() {
+	AsyncWait();
+	Rasterizer::g_geStateSerial++;
 	GPUCommon::ResetMatrices();
 	dirtyFlags_ |= SoftDirty::TRANSFORM_MATRIX | SoftDirty::RAST_TEX;
 }
@@ -1439,6 +2095,7 @@ void SoftGPU::Execute_Call(u32 op, u32 diff) {
 	} else if (currentList->stackptr == ARRAY_SIZE(currentList->stack)) {
 		ERROR_LOG(Log::G3D, "CALL: Stack full!");
 	} else {
+		GeVramCallNote(target, currentList->stackptr);
 		auto &stackEntry = currentList->stack[currentList->stackptr++];
 		stackEntry.pc = retval;
 		stackEntry.offsetAddr = gstate_c.offsetAddr;
@@ -1463,12 +2120,14 @@ void SoftGPU::FlushPendingDrawing() {
 }
 
 int SoftGPU::ListSync(int listid, int mode) {
+	AsyncWait();
 	// Take this as a cue that we need to finish drawing.
 	drawEngine_->transformUnit.Flush(this, "listsync");
 	return GPUCommon::ListSync(listid, mode);
 }
 
 u32 SoftGPU::DrawSync(int mode) {
+	AsyncWait();
 	// Take this as a cue that we need to finish drawing.
 	drawEngine_->transformUnit.Flush(this, "drawsync");
 	return GPUCommon::DrawSync(mode);
@@ -1480,16 +2139,72 @@ void SoftGPU::GetStats(StringWriter &w) {
 
 void SoftGPU::InvalidateCache(u32 addr, int size, GPUInvalidationType type)
 {
-	// Nothing to invalidate.
+	if (AsyncDefer(DeferredOp::INVALIDATE, addr, 0, size, (u32)type))
+		return;
+	// The CPU wrote back (dcache) or copied into this range: a hardware backend rechecks its
+	// textures there.
+	if (size < 0 || type == GPU_INVALIDATE_ALL)
+		Rasterizer::NoteGeMemoryMayHaveChanged();
+	else
+		Rasterizer::NoteGeDirtyRange(addr, (uint32_t)size);
 }
 
 void SoftGPU::PerformWriteFormattedFromMemory(u32 addr, int size, int width, GEBufferFormat format, int rectWidth)
 {
+	AsyncWait();
 	// Nothing to update, but remember it for EstimateFillCycles.
 	NoteVideoRange(addr, (u32)size);
+	// The memory changed behind the GE: a hardware backend's texture cache only rehashes ranges it
+	// was told about (Rasterizer::NoteGeDirtyRange), and this write never told it. Midnight Club:
+	// L.A. Remix decodes its video into main memory and draws it as a texture; the cache kept an old
+	// picture, refreshed only when something else invalidated it (glitchy, jerky video).
+	InvalidateCache(addr, size, GPU_INVALIDATE_HINT);
+	// A video frame written into VRAM is a new picture, as much as one the GE draws: with frameskip
+	// on, the display only shows a frame whose framebuffer is marked dirty (FramebufferDirty), and
+	// otherwise refreshes every 10th vblank. Videos the game shows straight from the decoder's
+	// output (Call of Duty's intro, Silent Hill Origins' menu background) ran at 6 frames a second.
+	MarkDirty(addr, (u32)size, SoftGPUVRAMDirty::DIRTY | SoftGPUVRAMDirty::REALLY_DIRTY);
+	// A hardware backend keeps what the GE drew in a framebuffer on its side until something reads
+	// it, and a video frame the CPU then wrote over it was never shown (Call of Duty's intro: sound,
+	// no picture). Have it write its framebuffers back now: the rows the CPU changed are kept and
+	// sent to it again, so the next frame shows the video.
+	// Only when it has drawn there since its last write-back: every video picture went through a
+	// full write-back of the RSX's framebuffers otherwise (counted in sceMpegAvcDecode's time;
+	// Midnight Club's intro spent up to 60 ms a frame in it).
+	if (Rasterizer::g_hardwareBackend && Memory::IsVRAMAddress(addr) &&
+		Rasterizer::g_hardwareBackend->HasPendingWrite(addr, 0, (u32)size, 1))
+		Rasterizer::g_hardwareBackend->Flush("output");
+}
+
+// A CPU-side copy or fill into VRAM (sceDmacMemcpy, the game's memcpy/memset) over a framebuffer
+// a hardware backend has drawn into since its last write-back: have it write back now, so the rows
+// the CPU then changes are seen as changed and sent to it again. Otherwise it keeps showing its own
+// copy (Silent Hill Origins' red loading screen: only the top part, the rest stayed black). Reading
+// such a framebuffer needs the write-back too.
+static void FlushBackendForCpuAccess(u32 dest, u32 src, int size) {
+	if (!Rasterizer::g_hardwareBackend || size <= 0)
+		return;
+	const bool dstHit = Memory::IsVRAMAddress(dest) && Rasterizer::g_hardwareBackend->HasPendingWrite(dest, 0, (u32)size, 1);
+	const bool srcHit = src && Memory::IsVRAMAddress(src) && Rasterizer::g_hardwareBackend->HasPendingWrite(src, 0, (u32)size, 1);
+	if (dstHit || srcHit)
+		Rasterizer::g_hardwareBackend->Flush("output");
+}
+
+// A file read straight into VRAM (sceIoRead, Core/HLE/sceIo.cpp) has finished: the same as a CPU
+// copy there. Silent Hill Origins reads its loading screen picture from the disc into the buffer it
+// composes the screen from (most likely: 64-row pieces of it changed behind the RSX renderer).
+void GPUNotifyCpuVramWrite(u32 addr, u32 size) {
+	if (!Rasterizer::g_hardwareBackend || size == 0 || !Memory::IsVRAMAddress(addr))
+		return;
+	if (gpu)
+		gpu->AsyncWait();
+	FlushBackendForCpuAccess(addr, 0, (int)size);
 }
 
 bool SoftGPU::PerformMemoryCopy(u32 dest, u32 src, int size, GPUCopyFlag flags) {
+	if (AsyncDefer(DeferredOp::COPY, dest, src, size, (u32)flags))
+		return false;
+	FlushBackendForCpuAccess(dest, src, size);
 	// Drawing can still be queued after a list stalled (FinishDeferred).
 	drawEngine_->transformUnit.FlushIfOverlap(this, "memcpy", false, src, size, size, 1);
 	drawEngine_->transformUnit.FlushIfOverlap(this, "memcpy", true, dest, size, size, 1);
@@ -1503,6 +2218,9 @@ bool SoftGPU::PerformMemoryCopy(u32 dest, u32 src, int size, GPUCopyFlag flags) 
 
 bool SoftGPU::PerformMemorySet(u32 dest, u8 v, int size)
 {
+	if (AsyncDefer(DeferredOp::SET, dest, 0, size, v))
+		return false;
+	FlushBackendForCpuAccess(dest, 0, size);
 	drawEngine_->transformUnit.FlushIfOverlap(this, "memset", true, dest, size, size, 1);
 	InvalidateCache(dest, size, GPU_INVALIDATE_HINT);
 	recorder_.NotifyMemset(dest, v, size);
@@ -1513,6 +2231,8 @@ bool SoftGPU::PerformMemorySet(u32 dest, u8 v, int size)
 
 bool SoftGPU::PerformReadbackToMemory(u32 dest, int size)
 {
+	if (AsyncDefer(DeferredOp::READBACK, dest, 0, size, 0))
+		return false;
 	drawEngine_->transformUnit.FlushIfOverlap(this, "readback", false, dest, size, size, 1);
 	InvalidateCache(dest, size, GPU_INVALIDATE_HINT);
 	return false;
@@ -1526,6 +2246,8 @@ bool SoftGPU::PerformReadbackStencilToMemory(u32 dest, int size) {
 
 bool SoftGPU::PerformWriteColorFromMemory(u32 dest, int size)
 {
+	if (AsyncDefer(DeferredOp::WRITE_COLOR, dest, 0, size, 0))
+		return false;
 	drawEngine_->transformUnit.FlushIfOverlap(this, "upload", true, dest, size, size, 1);
 	InvalidateCache(dest, size, GPU_INVALIDATE_HINT);
 	recorder_.NotifyUpload(dest, size);
@@ -1538,6 +2260,11 @@ bool SoftGPU::PerformWriteStencilFromMemory(u32 dest, int size, WriteStencil fla
 }
 
 bool SoftGPU::FramebufferDirty() {
+	// Run-ahead: a frame the list thread still draws isn't done; asked again at the next vblank
+	// (waiting here would stop the next frame's code at every vblank).
+	if (g_geAsyncRunAhead && AsyncBusy())
+		return false;
+	AsyncWait(GEASYNC_VBLANK);
 	if (g_Config.iFrameSkip != 0) {
 		return ClearDirty(displayFramebuf_, displayStride_, 272, displayFormat_, SoftGPUVRAMDirty::DIRTY);
 	}
@@ -1545,6 +2272,9 @@ bool SoftGPU::FramebufferDirty() {
 }
 
 bool SoftGPU::FramebufferReallyDirty() {
+	if (g_geAsyncRunAhead && AsyncBusy())
+		return false;
+	AsyncWait(GEASYNC_VBLANK);
 	if (g_Config.iFrameSkip != 0) {
 		return ClearDirty(displayFramebuf_, displayStride_, 272, displayFormat_, SoftGPUVRAMDirty::REALLY_DIRTY);
 	}
@@ -1565,6 +2295,7 @@ static DrawingCoords GetTargetSize(int stride) {
 }
 
 bool SoftGPU::GetCurrentFramebuffer(GPUDebugBuffer &buffer, GPUDebugFramebufferType type, int maxRes) {
+	AsyncWait();
 	int stride = gstate.FrameBufStride();
 	DrawingCoords size = GetTargetSize(stride);
 	GEBufferFormat fmt = gstate.FrameBufFormat();
@@ -1617,6 +2348,7 @@ bool SoftGPU::GetOutputFramebuffer(GPUDebugBuffer &buffer) {
 }
 
 bool SoftGPU::GetCurrentDepthbuffer(GPUDebugBuffer &buffer) {
+	AsyncWait();
 	DrawingCoords size = GetTargetSize(gstate.DepthBufStride());
 	buffer.Allocate(size.x, size.y, GPU_DBG_FORMAT_16BIT);
 
@@ -1642,6 +2374,7 @@ static inline u8 GetPixelStencil(GEBufferFormat fmt, int fbStride, int x, int y)
 }
 
 bool SoftGPU::GetCurrentStencilbuffer(GPUDebugBuffer &buffer) {
+	AsyncWait();
 	DrawingCoords size = GetTargetSize(gstate.FrameBufStride());
 	buffer.Allocate(size.x, size.y, GPU_DBG_FORMAT_8BIT);
 
@@ -1656,11 +2389,13 @@ bool SoftGPU::GetCurrentStencilbuffer(GPUDebugBuffer &buffer) {
 }
 
 bool SoftGPU::GetCurrentTexture(GPUDebugBuffer &buffer, int level, bool *isFramebuffer) {
+	AsyncWait();
 	*isFramebuffer = false;
 	return Rasterizer::GetCurrentTexture(buffer, level);
 }
 
 bool SoftGPU::GetCurrentClut(GPUDebugBuffer &buffer) {
+	AsyncWait();
 	const u32 bpp = gstate.getClutPaletteFormat() == GE_CMODE_32BIT_ABGR8888 ? 4 : 2;
 	const u32 pixels = 1024 / bpp;
 

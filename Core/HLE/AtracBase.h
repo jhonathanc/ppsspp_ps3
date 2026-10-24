@@ -50,31 +50,31 @@ inline bool AtracStatusIsNormal(AtracStatus status) {
 }
 
 struct SceAtracIdInfo {
-	s32 decodePos;        // Sample position in the song that we'll next be decoding from.
-	s32 endSample;        // Last sample index of the track.
-	s32 loopStart;        // Start of the loop (sample index)
-	s32 loopEnd;          // End of the loop (sample index)
-	s32 firstValidSample; // Seems to be the number of skipped samples at the start. After SetID, decodePos will match this. Was previously misnamed 'samplesPerChan'.
+	s32_le decodePos;        // Sample position in the song that we'll next be decoding from.
+	s32_le endSample;        // Last sample index of the track.
+	s32_le loopStart;        // Start of the loop (sample index)
+	s32_le loopEnd;          // End of the loop (sample index)
+	s32_le firstValidSample; // Seems to be the number of skipped samples at the start. After SetID, decodePos will match this. Was previously misnamed 'samplesPerChan'.
 	u8 numSkipFrames;      // This is 1 for a single frame when a loop is triggered, otherwise seems to stay at 0. Likely mis-named.
 	AtracStatus state;    // State enum, see AtracStatus.
 	u8 curBuffer;         // Current buffer (1 == second, 2 == done?) Previously unk
 	u8 numChan;           // Number of audio channels, usually 2 but 1 is possible.
-	u16 sampleSize;       // Size in bytes of an encoded audio frame.
-	u16 codec;            // Codec. 0x1000 is Atrac3+, 0x1001 is Atrac3. See the PSP_CODEC_ enum (only these two are supported).
-	s32 dataOff;          // File offset in bytes where the Atrac3+ frames start appearing. The first dummy packet starts here.
-	s32 curFileOff;       // File offset in bytes corresponding to the start of next packet that will be *decoded* (on the next call to sceAtracDecodeData).
-	s32 fileDataEnd;      // File size in bytes.
-	s32 loopNum;          // Current loop counter. If 0, will not loop. -1 loops for ever, positive numbers get decremented on the loop end. So to play a song 3 times and then end, set this to 2.
-	s32 streamDataByte;   // Number of bytes of queued/buffered/uploaded data. In full and half-way modes, this isn't decremented as you decode.
-	s32 streamOff;        // Streaming modes only: The byte offset inside the RAM buffer where sceAtracDecodeData will read from next. ONLY points to even packet boundaries.
-	s32 secondStreamOff;  // A kind of stream position in the secondary buffer.
-	u32 buffer;           // Address in RAM of the main buffer.
-	u32 secondBuffer;     // Address in RAM of the second buffer, or 0 if not used.
-	u32 bufferByte;       // Size in bytes of the main buffer.
-	u32 secondBufferByte; // Size in bytes of the second buffer.
+	u16_le sampleSize;       // Size in bytes of an encoded audio frame.
+	u16_le codec;            // Codec. 0x1000 is Atrac3+, 0x1001 is Atrac3. See the PSP_CODEC_ enum (only these two are supported).
+	s32_le dataOff;          // File offset in bytes where the Atrac3+ frames start appearing. The first dummy packet starts here.
+	s32_le curFileOff;       // File offset in bytes corresponding to the start of next packet that will be *decoded* (on the next call to sceAtracDecodeData).
+	s32_le fileDataEnd;      // File size in bytes.
+	s32_le loopNum;          // Current loop counter. If 0, will not loop. -1 loops for ever, positive numbers get decremented on the loop end. So to play a song 3 times and then end, set this to 2.
+	s32_le streamDataByte;   // Number of bytes of queued/buffered/uploaded data. In full and half-way modes, this isn't decremented as you decode.
+	s32_le streamOff;        // Streaming modes only: The byte offset inside the RAM buffer where sceAtracDecodeData will read from next. ONLY points to even packet boundaries.
+	s32_le secondStreamOff;  // A kind of stream position in the secondary buffer.
+	u32_le buffer;           // Address in RAM of the main buffer.
+	u32_le secondBuffer;     // Address in RAM of the second buffer, or 0 if not used.
+	u32_le bufferByte;       // Size in bytes of the main buffer.
+	u32_le secondBufferByte; // Size in bytes of the second buffer.
 	// Offset 72 here.
 	// make sure the size is 128
-	u32 unk[14];
+	u32_le unk[14];
 
 	// Simple helpers. Similar ones are on track_, but we shouldn't need track_ anymore when playing back.
 
@@ -111,9 +111,9 @@ struct SceAtracContext {
 };
 
 struct Atrac3LowLevelParams {
-	int encodedChannels;
-	int outputChannels;
-	int bytesPerFrame;
+	s32_le encodedChannels;
+	s32_le outputChannels;
+	s32_le bytesPerFrame;
 };
 
 struct AtracSingleResetBufferInfo {

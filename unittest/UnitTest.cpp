@@ -4030,7 +4030,9 @@ TestItem availableTests[] = {
 	TEST_ITEM(Utf8),
 	TEST_ITEM(TextDecoders),
 	TEST_ITEM(IRPassSimplify),
+#if PPSSPP_ARCH(ARM) || PPSSPP_ARCH(ARM64) || PPSSPP_ARCH(X86) || PPSSPP_ARCH(AMD64) || PPSSPP_ARCH(RISCV64) || PPSSPP_ARCH(LOONGARCH64)
 	TEST_ITEM(Jit),
+#endif
 	TEST_ITEM(JitDotBench),
 	TEST_ITEM(JitReplacementHooks),
 	TEST_ITEM(CPUEret),

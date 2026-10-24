@@ -18,6 +18,7 @@
 #pragma once
 
 #include <cstdint>
+#include "ppsspp_config.h"
 
 #ifdef _WIN32
 #include "CommonWindows.h"
@@ -54,7 +55,9 @@ public:
 #endif
 
 private:
-#ifdef _WIN32
+#if PPSSPP_PLATFORM(PS3)
+	MemArenaData *data_ = nullptr;
+#elif defined(_WIN32)
 	HANDLE hMemoryMapping;
 	SYSTEM_INFO sysInfo;
 #elif defined(__APPLE__)

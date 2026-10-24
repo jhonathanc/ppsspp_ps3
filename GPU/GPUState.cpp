@@ -102,7 +102,13 @@ static const u32_le *LoadMatrix(const u32_le *cmds, float *mtx, int sz) {
 	return cmds;
 }
 
+namespace Rasterizer {
+// GPU/Software: changes whenever the GE state may have (draw merging).
+extern uint32_t g_geStateSerial;
+}
+
 void GEState::Reset() {
+	Rasterizer::g_geStateSerial++;
 	memset(gstate.cmdmem, 0, sizeof(gstate.cmdmem));
 	for (int i = 0; i < 256; i++) {
 		gstate.cmdmem[i] = i << 24;
@@ -209,6 +215,7 @@ void GEState::Restore(const u32_le *ptr) {
 }
 
 void GEState::Restore(const u32_le *ptr, bool oldLayout) {
+	Rasterizer::g_geStateSerial++;
 	// Not sure what the first 10 values are, exactly, but these seem right.
 	gstate_c.vertexAddr = ptr[5];
 	gstate_c.indexAddr = ptr[6];

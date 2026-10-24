@@ -16,13 +16,17 @@
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
 // This code is part shamelessly "inspired" from JPSCP.
+#include <array>
 #include <map>
+#include <string>
 #include <memory>
 
 #include "Common/Serialize/SerializeFuncs.h"
 #include "Common/Serialize/SerializeMap.h"
 #include "Common/Swap.h"
 #include "Core/HLE/sceMpeg.h"
+#include "Core/HLE/sceDisplay.h"
+#include "Core/HLE/sceGe.h"
 #include "Core/HLE/sceMpegbase.h"
 #include "Core/HLE/sceKernelModule.h"
 #include "Core/HLE/sceKernelThread.h"
@@ -36,6 +40,9 @@
 #include "GPU/GPUCommon.h"
 #include "GPU/GPUState.h"
 #include "Core/System.h"
+#include "Core/CoreTiming.h"
+#include "Common/TimeUtil.h"
+#include "Common/FrontendTrace.h"
 
 // MPEG AVC elementary stream.
 static const int MPEG_AVC_ES_SIZE = 2048;          // MPEG packet size.
@@ -87,6 +94,128 @@ static const int avcCscDelayMs = 4000;
 static const int avcDecodeDelayMs = 5400;         // Varies between 4700 and 6000.
 static const int avcEmptyDelayMs = 320;
 static const int mpegDecodeErrorDelayMs = 100;
+
+// Video playback summary in the log, once a second of real time while a video plays: where a
+// player waits (data from the disc, decoding, its own timing). Midnight Club: L.A. Remix's intro
+// shows ~4.5 frames a second while the emulator idles half the time.
+namespace {
+struct MpegStats {
+	double start = 0.0;
+	u64 startTicks = 0;
+	int getAvcOk = 0, getAvcNoData = 0, getAtracOk = 0, getAtracNoData = 0;
+	int decodePictures = 0, decodeEmpty = 0, atracDecodes = 0, cscCalls = 0;
+	int putCalls = 0, putPackets = 0, availCalls = 0;
+	int lastAvail = 0, packets = 0;
+	double decodeMs = 0.0;
+	s64 videoPts = 0, audioPts = 0, firstVideoPts = -1, firstAudioPts = -1;
+	int vblanks = 0;
+	// Per PSP thread, what it was doing at each vblank: running, ready, waiting for a vblank,
+	// semaphore, delay, event flag, GE sync, audio, other.
+	std::map<std::string, std::array<int, 9>> threadStates;
+};
+MpegStats g_mpegStats;
+}
+
+// Called at each vblank while a video plays (sceDisplay).
+void MpegStatsVblank() {
+	if (g_mpegStats.start == 0.0)
+		return;
+	g_mpegStats.vblanks++;
+	for (const DebugThreadInfo &t : GetThreadsInfo()) {
+		int k = 8;
+		if (t.status & THREADSTATUS_RUNNING) k = 0;
+		else if (t.status & THREADSTATUS_READY) k = 1;
+		else if (t.status & THREADSTATUS_WAIT) {
+			switch (t.waitType) {
+			case WAITTYPE_VBLANK: k = 2; break;
+			case WAITTYPE_SEMA: k = 3; break;
+			case WAITTYPE_DELAY: case WAITTYPE_HLEDELAY: k = 4; break;
+			case WAITTYPE_EVENTFLAG: k = 5; break;
+			case WAITTYPE_GEDRAWSYNC: case WAITTYPE_GELISTSYNC: k = 6; break;
+			case WAITTYPE_AUDIOCHANNEL: k = 7; break;
+			default: k = 8; break;
+			}
+		} else {
+			continue;  // Dormant or dead.
+		}
+		g_mpegStats.threadStates[t.name][k]++;
+	}
+}
+
+static void MpegStatsTick(MpegContext *ctx);
+static bool MpegTimedStep(MpegContext *ctx) {
+	MpegStatsTick(ctx);
+	const double t0 = time_now_d();
+	const bool got = ctx->mediaengine->stepVideo(ctx->videoPixelMode);
+	g_mpegStats.decodeMs += (time_now_d() - t0) * 1000.0;
+	if (got)
+		g_mpegStats.decodePictures++;
+	else
+		g_mpegStats.decodeEmpty++;
+	return got;
+}
+
+static void MpegStatsTick(MpegContext *ctx) {
+	MpegStats &s = g_mpegStats;
+	if (!FrontendLogOn(FrontendLog::VIDEO)) {
+		// Also keeps MpegStatsVblank from going through the threads at every vblank.
+		s.start = 0.0;
+		return;
+	}
+	const double now = time_now_d();
+	if (s.start == 0.0) {
+		s.start = now;
+		s.startTicks = CoreTiming::GetTicks(currentMIPS);
+	}
+	if (ctx && ctx->mediaengine) {
+		s.videoPts = ctx->mediaengine->getVideoTimeStamp();
+		s.audioPts = ctx->mediaengine->getAudioTimeStamp();
+		if (s.firstVideoPts < 0) s.firstVideoPts = s.videoPts;
+		if (s.firstAudioPts < 0) s.firstAudioPts = s.audioPts;
+	}
+	if (now - s.start < 1.0)
+		return;
+	const double emuSec = cyclesToUs(CoreTiming::GetTicks(currentMIPS) - s.startTicks) / 1000000.0;
+	FrontendTrace("Video: %.1f s real (%.2f s emulated): video data asked %d times (none there yet %d), audio data %d (none %d); "
+		"%d pictures decoded (%d calls without one, %.1f ms decoding), %d colour conversions, %d audio decodes; "
+		"disc reads into the buffer: %d calls, %d packets; buffer checked %d times, %d of %d packets filled; "
+		"video time %.2f s, audio time %.2f s (moved %.2f / %.2f s)",
+		now - s.start, emuSec, s.getAvcOk + s.getAvcNoData, s.getAvcNoData, s.getAtracOk + s.getAtracNoData, s.getAtracNoData,
+		s.decodePictures, s.decodeEmpty, s.decodeMs, s.cscCalls, s.atracDecodes,
+		s.putCalls, s.putPackets, s.availCalls, s.lastAvail, s.packets,
+		s.videoPts / 90000.0, s.audioPts / 90000.0, (s.videoPts - s.firstVideoPts) / 90000.0, (s.audioPts - s.firstAudioPts) / 90000.0);
+	if (s.vblanks) {
+		// Running/ready/vblank/semaphore/delay/event flag/GE sync/audio/other, at s.vblanks vblanks.
+		static const char *const names[9] = {"run", "ready", "vblank", "sema", "delay", "flag", "ge", "audio", "other"};
+		std::string text;
+		for (const auto &it : s.threadStates) {
+			text += text.empty() ? "" : "; ";
+			text += it.first + ":";
+			for (int k = 0; k < 9; ++k) {
+				if (it.second[k]) {
+					char buf[32];
+					snprintf(buf, sizeof(buf), " %s %d", names[k], it.second[k]);
+					text += buf;
+				}
+			}
+		}
+		FrontendTrace("Video threads at %d vblanks: %s", s.vblanks, text.c_str());
+	}
+	{
+		GeVideoStats &g = g_geVideoStats;
+		FrontendTrace("Video GE: %d syncs scheduled, on average %.1f ms ahead (most %.1f ms); %d waits for the GE, %d woken, waited %.1f ms on average (longest %.1f ms)",
+			g.syncs, g.syncs ? g.syncAheadUs / 1000.0 / g.syncs : 0.0, g.syncAheadMaxUs / 1000.0,
+			g.waits, g.woken, g.woken ? g.waitedUs / 1000.0 / g.woken : 0.0, g.waitedMaxUs / 1000.0);
+		FrontendTrace("Video GE lists: %s", GeListTimeStatsText().c_str());
+		std::map<int, u64> keep;
+		keep.swap(g.waitStart);
+		g = GeVideoStats{};
+		g.waitStart.swap(keep);
+	}
+	s = MpegStats{};
+	s.start = now;
+	s.startTicks = CoreTiming::GetTicks(currentMIPS);
+}
 static const int mpegTimestampPerSecond = 90000;  // How many MPEG Timestamp units in a second.
 static const int videoTimestampStep = 3003;       // Value based on pmfplayer (mpegTimestampPerSecond / 29.970 (fps)).
 static const int audioTimestampStep = 4180;       // For audio play at 44100 Hz (2048 samples / 44100 * mpegTimestampPerSecond == 4180)
@@ -497,7 +626,7 @@ static u32 sceMpegRingbufferConstruct(u32 ringbufferAddr, u32 numPackets, u32 da
 	if (ring->semaID != 0) {
 		// I'm starting to think this is just padding or something.
 		// It's not written by this function.
-		WARN_LOG(Log::Mpeg, "Detected 'semaID' (might not be) %d (%08x)", ring->semaID, ring->semaID);
+		WARN_LOG(Log::Mpeg, "Detected 'semaID' (might not be) %d (%08x)", (int)ring->semaID, (unsigned int)ring->semaID);
 	}
 	ring->mpeg = 0;
 	// This isn't in ver 0104, but it is in 0105.
@@ -925,6 +1054,9 @@ static H264Frames *pmpframes;
 static bool decodePmpVideo(PSPPointer<SceMpegRingBuffer> ringbuffer, u32 pmpctxAddr){
 
 #ifdef USE_FFMPEG
+	// Videos off for this game: as without FFmpeg.
+	if (!MediaVideoDecodeEnabled())
+		return false;
 	// the current video is pmp iff pmp_videoSource is a valid addresse
 	MpegContext* ctx = getMpegCtx(pmpctxAddr);
 	if (Memory::IsValidAddress(pmp_videoSource)){
@@ -1154,6 +1286,7 @@ static u32 sceMpegAvcDecode(u32 mpeg, u32 auAddr, u32 frameWidth, u32 bufferAddr
 			ctx->mediaengine->m_pFrameRGB = pmp_queue.front();
 			int bufferSize = ctx->mediaengine->writeVideoImage(buffer, frameWidth, ctx->videoPixelMode);
 			gpu->PerformWriteFormattedFromMemory(buffer, bufferSize, frameWidth, (GEBufferFormat)ctx->videoPixelMode);
+			__DisplayNoteVideoFrame(ctx->mediaengine->getVideoTimeStamp());
 			ctx->avc.avcFrameStatus = 1;
 			ctx->videoFrameCount++;
 
@@ -1162,9 +1295,10 @@ static u32 sceMpegAvcDecode(u32 mpeg, u32 auAddr, u32 frameWidth, u32 bufferAddr
 			pmp_queue.pop_front();
 		}
 #endif
-	} else if (ctx->mediaengine->stepVideo(ctx->videoPixelMode)) {
+	} else if (MpegTimedStep(ctx)) {
 		int bufferSize = ctx->mediaengine->writeVideoImage(buffer, frameWidth, ctx->videoPixelMode);
 		gpu->PerformWriteFormattedFromMemory(buffer, bufferSize, frameWidth, (GEBufferFormat)ctx->videoPixelMode);
+		__DisplayNoteVideoFrame(ctx->mediaengine->getVideoTimeStamp());
 		ctx->avc.avcFrameStatus = 1;
 		ctx->videoFrameCount++;
 	} else {
@@ -1321,7 +1455,7 @@ static int sceMpegAvcDecodeYCbCr(u32 mpeg, u32 auAddr, u32 bufferAddr, u32 initA
 	u32 init = Memory::ReadUnchecked_U32(initAddr);
 	DEBUG_LOG(Log::Mpeg, "*buffer = %08x, *init = %08x", buffer, init);
 
-	if (ctx->mediaengine->stepVideo(ctx->videoPixelMode)) {
+	if (MpegTimedStep(ctx)) {
 		// Don't draw here, we'll draw in the Csc func.
 		ctx->avc.avcFrameStatus = 1;
 		ctx->videoFrameCount++;
@@ -1440,6 +1574,9 @@ static int sceMpegRingbufferAvailableSize(u32 ringbufferAddr) {
 	if (ctx->mediaengine && ctx->isAnalyzed) {
 		ringbuffer->packetsAvail = ringbuffer->packets - ctx->mediaengine->getRemainSize() / 2048;
 	}
+	g_mpegStats.availCalls++;
+	g_mpegStats.lastAvail = ringbuffer->packetsAvail;
+	g_mpegStats.packets = ringbuffer->packets;
 
 	hleEatCycles(2020);
 	hleReSchedule("mpeg ringbuffer avail");
@@ -1467,7 +1604,7 @@ void PostPutAction::run(MipsCall &call) {
 
 	if (!ctx) {
 		_dbg_assert_(false);
-		ERROR_LOG(Log::Mpeg, "sceMpegRingbufferPut: bad mpeg handle %08x", ringbuffer->mpeg);
+		ERROR_LOG(Log::Mpeg, "sceMpegRingbufferPut: bad mpeg handle %08x", (unsigned int)ringbuffer->mpeg);
 		return;
 	}
 
@@ -1539,7 +1676,7 @@ void PostPutAction::run(MipsCall &call) {
 			}
 		}
 	}
-	DEBUG_LOG(Log::Mpeg, "packetAdded: %i packetsRead: %i packetsTotal: %i", packetsAddedThisRound, ringbuffer->packetsRead, ringbuffer->packets);
+	DEBUG_LOG(Log::Mpeg, "packetAdded: %i packetsRead: %i packetsTotal: %i", packetsAddedThisRound, (int)ringbuffer->packetsRead, (int)ringbuffer->packets);
 
 	if (packetsAddedThisRound < 0 && ringbufferPutPacketsAdded == 0) {
 		// Return an error.
@@ -1560,18 +1697,20 @@ static u32 sceMpegRingbufferPut(u32 ringbufferAddr, int numPackets, int availabl
 	}
 
 	numPackets = std::min(numPackets, available);
+	g_mpegStats.putCalls++;
 	// Generally, program will call sceMpegRingbufferAvailableSize() before this func.
 	// Seems still need to check actual available, Patapon 3 for example.
-	numPackets = std::min(numPackets, ringbuffer->packets - ringbuffer->packetsAvail);
+	numPackets = std::min(numPackets, (s32)ringbuffer->packets - (s32)ringbuffer->packetsAvail);
 	if (numPackets <= 0) {
 		return hleLogDebug(Log::Mpeg, 0, "no packets to enqueue");
 	}
 
 	MpegContext *ctx = getMpegCtx(ringbuffer->mpeg);
 	if (!ctx) {
-		return hleLogWarning(Log::Mpeg, -1, "bad mpeg handle %08x", ringbuffer->mpeg);
+		return hleLogWarning(Log::Mpeg, -1, "bad mpeg handle %08x", (unsigned int)ringbuffer->mpeg);
 	}
 	ringbufferPutPacketsAdded = 0;
+	g_mpegStats.putPackets += numPackets;
 	// Execute callback function as a direct MipsCall, no blocking here so no messing around with wait states etc
 	if (ringbuffer->callback_addr != 0) {
 		DEBUG_LOG(Log::Mpeg, "sceMpegRingbufferPut(%08x, %i, %i)", ringbufferAddr, numPackets, available);
@@ -1621,7 +1760,9 @@ static int sceMpegGetAvcAu(u32 mpeg, u32 streamId, u32 auAddr, u32 attrAddr)
 	SceMpegAu avcAu;
 	avcAu.read(auAddr);
 
+	MpegStatsTick(ctx);
 	if (ringbuffer->packetsRead == 0 || ringbuffer->packetsAvail == 0) {
+		g_mpegStats.getAvcNoData++;
 		avcAu.pts = 0;
 		avcAu.dts = 0;
 		avcAu.write(auAddr);
@@ -1675,6 +1816,10 @@ static int sceMpegGetAvcAu(u32 mpeg, u32 streamId, u32 auAddr, u32 attrAddr)
 
 	// The avcau struct may have been modified by mediaengine, write it back.
 	avcAu.write(auAddr);
+	if (result == 0)
+		g_mpegStats.getAvcOk++;
+	else
+		g_mpegStats.getAvcNoData++;
 
 	if (result == 0) {
 		// Jeanne d'Arc return 00000000 as attrAddr here and cause WriteMemoryOrRaiseException error
@@ -1723,6 +1868,8 @@ static int sceMpegGetAtracAu(u32 mpeg, u32 streamId, u32 auAddr, u32 attrAddr)
 	SceMpegAu atracAu;
 	atracAu.read(auAddr);
 
+	MpegStatsTick(ctx);
+	g_mpegStats.getAtracOk++;  // Less the ones without data, counted there.
 	auto streamInfo = ctx->streamMap.find(streamId);
 	if (streamInfo != ctx->streamMap.end() && streamInfo->second.needsReset) {
 		atracAu.pts = 0;
@@ -1750,6 +1897,8 @@ static int sceMpegGetAtracAu(u32 mpeg, u32 streamId, u32 auAddr, u32 attrAddr)
 		atracAu.dts = 0;
 		atracAu.write(auAddr);
 		// TODO: Does this really delay?
+		g_mpegStats.getAtracNoData++;
+		g_mpegStats.getAtracOk--;
 		return hleDelayResult(hleLogDebug(Log::Mpeg, SCE_MPEG_ERROR_NO_DATA), "mpeg get atrac", mpegDecodeErrorDelayMs);
 	}
 
@@ -1937,6 +2086,8 @@ static u32 sceMpegAtracDecode(u32 mpeg, u32 auAddr, u32 bufferAddr, int init)
 	if (!Memory::IsValidAddress(bufferAddr)) {
 		return hleLogWarning(Log::Mpeg, -1, "invalid addresses");
 	}
+	MpegStatsTick(ctx);
+	g_mpegStats.atracDecodes++;
 
 	SceMpegAu atracAu;
 	atracAu.read(auAddr);
@@ -1971,6 +2122,8 @@ static u32 sceMpegAvcCsc(u32 mpeg, u32 sourceAddr, u32 rangeAddr, int frameWidth
 	if (!ctx) {
 		return hleLogWarning(Log::Mpeg, -1, "bad mpeg handle");
 	}
+	MpegStatsTick(ctx);
+	g_mpegStats.cscCalls++;
 
 	if (frameWidth == 0) {
 		if (!ctx->defaultFrameWidth) {
@@ -1992,6 +2145,7 @@ static u32 sceMpegAvcCsc(u32 mpeg, u32 sourceAddr, u32 rangeAddr, int frameWidth
 
 	int destSize = ctx->mediaengine->writeVideoImageWithRange(destAddr, frameWidth, ctx->videoPixelMode, x, y, width, height);
 	gpu->PerformWriteFormattedFromMemory(destAddr, destSize, frameWidth, (GEBufferFormat)ctx->videoPixelMode);
+	__DisplayNoteVideoFrame(ctx->mediaengine->getVideoTimeStamp());
 
 	// Do not use avcDecodeDelayMs 's value
 	// Will cause video 's screen dislocation in Bleach heat of soul 6

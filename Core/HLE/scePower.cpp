@@ -14,6 +14,7 @@
 
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
+#include "Common/FrontendTrace.h"
 #include <algorithm>
 #include <map>
 #include <vector>
@@ -25,6 +26,7 @@
 #include "Core/HLE/ErrorCodes.h"
 #include "Core/CoreTiming.h"
 #include "Core/MemMap.h"
+#include "Core/MIPS/MIPS.h"
 #include "Core/Reporting.h"
 #include "Core/Config.h"
 #include "Core/System.h"
@@ -326,6 +328,14 @@ static int sceKernelPowerTick(int flag) {
 	return hleLogDebug(Log::HLE, 0, "UNIMPL");
 }
 
+#if PPSSPP_PLATFORM(PS3)
+
+static int g_volatileLogs = 0;
+#define VOLATILE_TRACE(...) do { if (g_volatileLogs < 40) { g_volatileLogs++; FrontendTrace(__VA_ARGS__); } } while (0)
+#else
+#define VOLATILE_TRACE(...) do {} while (0)
+#endif
+
 // not a syscall
 int KernelVolatileMemLock(int type, u32 paddr, u32 psize) {
 	if (type != 0) {
@@ -345,6 +355,7 @@ int KernelVolatileMemLock(int type, u32 paddr, u32 psize) {
 		Memory::WriteUnchecked_U32(0x00400000, psize);
 	}
 	volatileMemLocked = true;
+	VOLATILE_TRACE("Volatile memory 08400000 locked (pc %08x, ra %08x)", currentMIPS->pc, currentMIPS->r[MIPS_REG_RA]);
 	NotifyMemInfo(MemBlockFlags::ALLOC, 0x08400000, 0x400000, "Volatile memory (locked)");
 	return 0;
 }
@@ -382,6 +393,7 @@ int KernelVolatileMemUnlock(int type) {
 	}
 
 	volatileMemLocked = false;
+	VOLATILE_TRACE("Volatile memory 08400000 unlocked (pc %08x, ra %08x)", currentMIPS->pc, currentMIPS->r[MIPS_REG_RA]);
 	NotifyMemInfo(MemBlockFlags::ALLOC, 0x08400000, 0x400000, "Volatile memory (not locked)");
 
 	// Wake someone, always fifo.
@@ -584,7 +596,11 @@ static float scePowerGetCpuClockFrequencyFloat() {
 	// precision, as pll * n / 511, rather than from whole Hz - which is off in the last digit
 	// (power/freq).
 	const double step = (double)pllFreq / 511.0;
+#if PPSSPP_PLATFORM(PS3)
+	const float steps = (float)::round(CoreTiming::GetClockFrequencyHz() / step);
+#else
 	const float steps = (float)std::round(CoreTiming::GetClockFrequencyHz() / step);
+#endif
 	const float pllMhz = (float)(pllFreq / 1000000.0);
 	float cpuFreq = (pllMhz * steps) / 511.0f;
 	DEBUG_LOG(Log::sceMisc, "%f=scePowerGetCpuClockFrequencyFloat()", (float)cpuFreq);

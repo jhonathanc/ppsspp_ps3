@@ -15,7 +15,10 @@
 // Official git repository and contact information can be found at
 // https://github.com/hrydgard/ppsspp and http://www.ppsspp.org/.
 
+#include "GPU/PS3Profile.h"
 #include <algorithm>
+#include <vector>
+#include <cstdlib>
 
 #include "Common/Profiler/Profiler.h"
 
@@ -26,7 +29,9 @@
 #include "Core/Reporting.h"
 #include "Core/Util/AudioFormat.h"
 #include "Core/System.h"
+#include "Core/HW/SoundDebug.h"
 #include "SasAudio.h"
+#include "Core/HW/SasSpu.h"
 
 static const u8 f[16][2] = {
 	{   0,   0 },
@@ -515,6 +520,13 @@ void SasVoice::ReadSamples(s16 *output, int numSamples) {
 					break;
 				}
 				Memory::Memcpy(out, pcmAddr + pcmIndex * sizeof(s16), size * sizeof(s16), "SasVoicePCM");
+#if COMMON_BIG_ENDIAN
+				for (u32 i = 0; i < size; ++i) {
+					s16_le sample;
+					memcpy(&sample, out + i, sizeof(sample));
+					out[i] = sample;
+				}
+#endif
 				pcmIndex += size;
 				needed -= size;
 				out += size;
@@ -654,13 +666,23 @@ void SasInstance::MixVoice(SasVoice &voice) {
 	}
 }
 
-void SasInstance::Mix(u32 outAddr, u32 inAddr, int leftVol, int rightVol, bool mute) {
-	for (int v = 0; v < PSP_SAS_VOICES_MAX; v++) {
+#if defined(__PSL1GHT__) || defined(PPSSPP_PS3_SAS_TESTS)
+#include "PS3/spu/SasBridge.inl"
+#else
+void SasInstance::MixVoices() {
+	for (int v = 0; v < PSP_SAS_VOICES_MAX; ++v) {
 		SasVoice &voice = voices[v];
-		if (!voice.playing || voice.paused)
+		if (!voice.playing || voice.paused) {
 			continue;
+		}
 		MixVoice(voice);
 	}
+}
+#endif
+
+void SasInstance::Mix(u32 outAddr, u32 inAddr, int leftVol, int rightVol, bool mute) {
+	PS3_PROFILE(sasMix);
+	MixVoices();
 
 	// Apply mute if needed (note: we try to keep everything else identical to the non-muted case).
 	if (mute) {
@@ -671,8 +693,20 @@ void SasInstance::Mix(u32 outAddr, u32 inAddr, int leftVol, int rightVol, bool m
 	// Then mix the send buffer in with the rest.
 
 	// Alright, all voices mixed. Let's convert and clip, and at the same time, wipe mixBuffer for next time. Could also dither.
-	s16 *outp = (s16 *)Memory::GetPointerWriteRangeOrException(outAddr, 4 * grainSize);
-	const s16 *inp = inAddr ? (const s16 *)Memory::GetPointerRangeOrException(inAddr, 4 * grainSize) : 0;
+	s16_le *outp = (s16_le *)Memory::GetPointerWriteRangeOrException(outAddr, 4 * grainSize);
+	const s16_le *inp = inAddr ? (const s16_le *)Memory::GetPointerRangeOrException(inAddr, 4 * grainSize) : 0;
+	// Sound debug: the game's buffer is often the output too (mixed in place), so it is read first.
+	const bool debug = SoundDebugOn() && outp && outputMode == PSP_SAS_OUTPUTMODE_MIXED;
+	static std::vector<int> debugIn;
+	if (debug) {
+		debugIn.assign(grainSize * 2, 0);
+		if (inp) {
+			for (int i = 0; i < grainSize * 2; i += 2) {
+				debugIn[i] = ((int)(s16)inp[i] * leftVol) >> 12;
+				debugIn[i + 1] = ((int)(s16)inp[i + 1] * rightVol) >> 12;
+			}
+		}
+	}
 	if (!outp) {
 		WARN_LOG_REPORT(Log::sceSas, "Bad SAS Mix output address: %08x, grain=%d", outAddr, grainSize);
 	} else if (outputMode == PSP_SAS_OUTPUTMODE_MIXED) {
@@ -684,10 +718,10 @@ void SasInstance::Mix(u32 outAddr, u32 inAddr, int leftVol, int rightVol, bool m
 			NotifyMemInfo(MemBlockFlags::WRITE, outAddr, grainSize * sizeof(u16) * 2, "SasMix");
 		}
 	} else {
-		s16 *outpL = outp + grainSize * 0;
-		s16 *outpR = outp + grainSize * 1;
-		s16 *outpSendL = outp + grainSize * 2;
-		s16 *outpSendR = outp + grainSize * 3;
+		s16_le *outpL = outp + grainSize * 0;
+		s16_le *outpR = outp + grainSize * 1;
+		s16_le *outpSendL = outp + grainSize * 2;
+		s16_le *outpSendR = outp + grainSize * 3;
 		WARN_LOG_REPORT_ONCE(sasraw, Log::SasMix, "sceSasCore: raw outputMode");
 		for (int i = 0; i < grainSize * 2; i += 2) {
 			*outpL++ = clamp_s16(mixBuffer[i + 0]);
@@ -697,12 +731,44 @@ void SasInstance::Mix(u32 outAddr, u32 inAddr, int leftVol, int rightVol, bool m
 		}
 		NotifyMemInfo(MemBlockFlags::WRITE, outAddr, grainSize * sizeof(u16) * 4, "SasMix");
 	}
+	if (SoundDebugOn()) {
+		SoundDebugStats &d = g_soundDebug;
+		d.sasMixes++;
+		d.sasGrain = grainSize;
+		d.sasOutputMode = outputMode;
+		d.sasEffectType = waveformEffect.type;
+		d.sasDry = waveformEffect.isDryOn != 0;
+		d.sasWet = waveformEffect.isWetOn != 0;
+		d.effectVolL = waveformEffect.leftVol;
+		d.effectVolR = waveformEffect.rightVol;
+		const bool wet = d.sasWet && debug;
+		for (int i = 0; i < grainSize * 2; ++i) {
+			const int64_t dry = mixBuffer[i];
+			const int64_t send = wet ? sendBufferProcessed[i] : 0;
+			d.sasDryPeak = std::max(d.sasDryPeak, dry < 0 ? -dry : dry);
+			d.sasWetPeak = std::max(d.sasWetPeak, send < 0 ? -send : send);
+			if (debug) {
+				const int in = debugIn[i];
+				d.sasInPeak = std::max(d.sasInPeak, in < 0 ? -in : in);
+				const int64_t out = (int64_t)in + (d.sasDry ? dry : 0) + send;
+				const int64_t a = out < 0 ? -out : out;
+				d.sasOutPeak = std::max(d.sasOutPeak, a);
+				if (out > 32767 || out < -32768) d.sasClipped++;
+			}
+		}
+		d.sasSamples += grainSize * 2;
+		if (inp) {
+			d.sasWithInput++;
+			d.sasInVolL = leftVol;
+			d.sasInVolR = rightVol;
+		}
+	}
 	memset(mixBuffer, 0, grainSize * sizeof(int) * 2);
 	memset(sendBuffer, 0, grainSize * sizeof(int) * 2);
 }
 
 // Note: leftVol/rightVol here are how much to scale the inp content by, not the mixBuffer.
-void SasInstance::WriteMixedOutput(s16 *outp, const s16 *inp, int leftVol, int rightVol) {
+void SasInstance::WriteMixedOutput(s16_le *outp, const s16_le *inp, int leftVol, int rightVol) {
 	const bool dry = waveformEffect.isDryOn != 0;
 	const bool wet = waveformEffect.isWetOn != 0;
 	if (wet) {

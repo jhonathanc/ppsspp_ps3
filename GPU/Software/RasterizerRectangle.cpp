@@ -82,7 +82,7 @@ static uint32_t StandardAlphaBlend(uint32_t source, uint32_t dst) {
 
 // Through mode, with the specific Darkstalker settings.
 template <GEBufferFormat fmt, bool alphaBlend>
-static inline void DrawSinglePixel(u16 *pixel, const u32 color_in) {
+static inline void DrawSinglePixel(u16_le *pixel, const u32 color_in) {
 	u32 new_color;
 	// Because of this check, we only support src.a / 1-src.a blending.
 	if (!alphaBlend || (color_in >> 24) == 255) {
@@ -123,7 +123,7 @@ static inline void DrawSinglePixel(u16 *pixel, const u32 color_in) {
 }
 
 template <bool alphaBlend>
-static inline void DrawSinglePixel32(u32 *pixel, const u32 color_in) {
+static inline void DrawSinglePixel32(u32_le *pixel, const u32 color_in) {
 	u32 new_color;
 	// Because of this check, we only support src.a / 1-src.a blending.
 	if (!alphaBlend || (color_in >> 24) == 255) {
@@ -226,8 +226,8 @@ static void DrawSpriteTex(const DrawingCoords &pos0, const DrawingCoords &pos1, 
 	const Vec4<int> c0 = Vec4<int>::FromRGBA(color0);
 	for (int y = pos0.y; y < pos1.y; y++) {
 		int s = s_start;
-		u16 *pixel16 = fb.Get16Ptr(pos0.x, y, state.pixelID.cached.framebufStride);
-		u32 *pixel32 = fb.Get32Ptr(pos0.x, y, state.pixelID.cached.framebufStride);
+		u16_le *pixel16 = fb.Get16Ptr(pos0.x, y, state.pixelID.cached.framebufStride);
+		u32_le *pixel32 = fb.Get32Ptr(pos0.x, y, state.pixelID.cached.framebufStride);
 		for (int x = pos0.x; x < pos1.x; x++) {
 			Vec4<int> tex_color = fetchFunc(s, t, texptr, texbufw, 0, state.samplerID);
 			if (isWhite) {
@@ -298,13 +298,13 @@ static void DrawSpriteNoTex(const DrawingCoords &pos0, const DrawingCoords &pos1
 
 	for (int y = pos0.y; y < pos1.y; y++) {
 		if (fmt == GE_FORMAT_8888) {
-			u32 *pixel = fb.Get32Ptr(pos0.x, y, state.pixelID.cached.framebufStride);
+			u32_le *pixel = fb.Get32Ptr(pos0.x, y, state.pixelID.cached.framebufStride);
 			for (int x = pos0.x; x < pos1.x; x++) {
 				DrawSinglePixel32<alphaBlend>(pixel, color0);
 				pixel++;
 			}
 		} else {
-			u16 *pixel = fb.Get16Ptr(pos0.x, y, state.pixelID.cached.framebufStride);
+			u16_le *pixel = fb.Get16Ptr(pos0.x, y, state.pixelID.cached.framebufStride);
 			for (int x = pos0.x; x < pos1.x; x++) {
 				DrawSinglePixel<fmt, alphaBlend>(pixel, color0);
 				pixel++;

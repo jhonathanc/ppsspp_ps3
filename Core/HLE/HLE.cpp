@@ -45,8 +45,10 @@
 #include "Core/HLE/sceKernelInterrupt.h"
 #include "Core/HLE/sceKernelModule.h"
 #include "Core/HLE/sceFont.h"
+#include "Core/Util/PSARUnpack.h"
 #include "Core/FileSystems/MetaFileSystem.h"
 #include "Core/HLE/HLE.h"
+#include "Core/HW/MediaEngine.h"
 
 enum {
 	// Do nothing after the syscall.
@@ -106,14 +108,16 @@ struct HLEMipsCallStack {
 			u32_le func;
 			u32_le actionIndex;
 			u32_le argc;
-		};
+		} call;
 		struct {
 			u32_le ra;
 			u32_le v0;
 			u32_le v1;
-		};
+		} saved;
 	};
 };
+
+static_assert(sizeof(HLEMipsCallStack) == 16, "PSP call stack wire layout");
 
 // No need to save state, always flushed at a syscall end.
 static std::vector<HLEMipsCallInfo> enqueuedMipsCalls;
@@ -260,6 +264,9 @@ static DisableHLEFlags ComputeDisableHLEFlags(DisableHLEFlags alwaysDisabled = A
 	flags &= ~(DisableHLEFlags)g_Config.iForceEnableHLE;
 	// Anything whose firmware module isn't actually present stays HLE'd.
 	flags &= ~g_unavailableDisableFlags;
+	// PS3: Killzone with videos on plays them through our sceMpeg (MediaGameUsesHLEMpeg).
+	if (MediaGameUsesHLEMpeg())
+		flags &= ~DisableHLEFlags::sceMpeg;
 
 	// Our psmf and psmfPlayer HLE plays video by calling our sceMpeg HLE, so it has nothing to talk
 	// to when the real mpeg.prx is running: the player sits in "not yet playing" forever and no
@@ -411,7 +418,11 @@ void HLECheckModuleAvailability() {
 	// libfont.prx/sceFont is shipped on game discs but reads its fonts from flash0:/font and has
 	// nothing to fall back on, so the fonts are required.
 	if (AlwaysDisableHLEFlags() & DisableHLEFlags::sceFont) {
-		if (!NandFontsComplete()) {
+		// Unpacked now, before the game's modules load, so the disc's libfont can run this boot.
+		if (g_fontsFromDisc && !NandFontsComplete() && MountedDiscHasUpdater()) {
+			InstallFontsFromDiscUpdater();
+		}
+		if (!g_fontsFromDisc || !NandFontsComplete()) {
 			g_unavailableDisableFlags |= DisableHLEFlags::sceFont;
 			INFO_LOG(Log::HLE, "flash0:/font doesn't have this firmware's fonts - using the HLE sceFont rather than the disc's.");
 		}
@@ -851,9 +862,9 @@ static void hleFlushCalls(MIPSState *mips) {
 	sp -= sizeof(HLEMipsCallStack);
 	stackData.ptr = sp;
 	stackData->nextOff = 0xFFFFFFFF;
-	stackData->ra = mips->pc;
-	stackData->v0 = mips->r[MIPS_REG_V0];
-	stackData->v1 = mips->r[MIPS_REG_V1];
+	stackData->saved.ra = mips->pc;
+	stackData->saved.v0 = mips->r[MIPS_REG_V0];
+	stackData->saved.v1 = mips->r[MIPS_REG_V1];
 
 	// Now we'll set up the first in the chain.
 	mips->pc = enqueuedMipsCalls[0].func;
@@ -872,14 +883,14 @@ static void hleFlushCalls(MIPSState *mips) {
 		sp -= stackAligned;
 		stackData.ptr = sp;
 		stackData->nextOff = stackAligned;
-		stackData->func = info.func;
+		stackData->call.func = info.func;
 		if (info.action) {
-			stackData->actionIndex = (int)mipsCallActions.size();
+			stackData->call.actionIndex = (int)mipsCallActions.size();
 			mipsCallActions.push_back(info.action);
 		} else {
-			stackData->actionIndex = 0xFFFFFFFF;
+			stackData->call.actionIndex = 0xFFFFFFFF;
 		}
-		stackData->argc = (int)info.args.size();
+		stackData->call.argc = (int)info.args.size();
 		for (int j = 0; j < (int)info.args.size(); ++j) {
 			Memory::WriteUnchecked_U32(info.args[j], sp + sizeof(HLEMipsCallStack) + j * sizeof(u32));
 		}
@@ -903,9 +914,9 @@ void HLEReturnFromMipsCall(MIPSState *mips) {
 		return;
 	}
 
-	if (stackData->actionIndex != 0xFFFFFFFF && stackData->actionIndex < (u32)mipsCallActions.size() && mipsCallActions[stackData->actionIndex] != nullptr) {
-		PSPAction *&action = mipsCallActions[stackData->actionIndex];
-		VERBOSE_LOG(Log::HLE, "Executing action for HLE mips call at %08x, sp=%08x", stackData->func, sp);
+	if (stackData->call.actionIndex != 0xFFFFFFFF && stackData->call.actionIndex < (u32)mipsCallActions.size() && mipsCallActions[stackData->call.actionIndex] != nullptr) {
+		PSPAction *&action = mipsCallActions[stackData->call.actionIndex];
+		VERBOSE_LOG(Log::HLE, "Executing action for HLE mips call at %08x, sp=%08x", (unsigned int)stackData->call.func, sp);
 
 		// Search for the saved v0/v1 values, to preserve the PSPAction API...
 		PSPPointer<HLEMipsCallStack> finalMarker = stackData;
@@ -920,11 +931,11 @@ void HLEReturnFromMipsCall(MIPSState *mips) {
 		}
 
 		MipsCall mc;
-		mc.savedV0 = finalMarker->v0;
-		mc.savedV1 = finalMarker->v1;
+		mc.savedV0 = finalMarker->saved.v0;
+		mc.savedV1 = finalMarker->saved.v1;
 		action->run(mc);
-		finalMarker->v0 = mc.savedV0;
-		finalMarker->v1 = mc.savedV1;
+		finalMarker->saved.v0 = mc.savedV0;
+		finalMarker->saved.v1 = mc.savedV1;
 
 		delete action;
 		action = nullptr;
@@ -937,9 +948,9 @@ void HLEReturnFromMipsCall(MIPSState *mips) {
 
 	if (stackData->nextOff == 0xFFFFFFFF) {
 		// We're done.  Grab the HLE result's v0/v1 and return from the syscall.
-		mips->pc = stackData->ra;
-		mips->r[MIPS_REG_V0] = stackData->v0;
-		mips->r[MIPS_REG_V1] = stackData->v1;
+		mips->pc = stackData->saved.ra;
+		mips->r[MIPS_REG_V0] = stackData->saved.v0;
+		mips->r[MIPS_REG_V1] = stackData->saved.v1;
 
 		sp += sizeof(HLEMipsCallStack);
 
@@ -958,9 +969,9 @@ void HLEReturnFromMipsCall(MIPSState *mips) {
 
 	// Alright, we have another to call.
 	hleSkipDeadbeef();
-	mips->pc = stackData->func;
+	mips->pc = stackData->call.func;
 	mips->r[MIPS_REG_RA] = HLEMipsCallReturnAddress();
-	for (int i = 0; i < (int)stackData->argc; i++) {
+	for (int i = 0; i < (int)stackData->call.argc; i++) {
 		// The check at the start of the function should be enough to use an unchecked read (well, kinda..)
 		mips->r[MIPS_REG_A0 + i] = Memory::ReadUnchecked_U32(sp + sizeof(HLEMipsCallStack) + i * sizeof(u32));
 	}
@@ -1070,6 +1081,72 @@ static void UpdateSyscallStats(int modulenum, int funcnum, double total) {
 	}
 }
 
+#if PPSSPP_ARCH(POWERPC)
+// PS3 port: host time per HLE function, for the frontend's perf log (where "PSP CPU" time goes).
+#include "GPU/PS3Profile.h"
+namespace {
+struct HleProfEntry { const HLEFunction *func; uint64_t ticks; uint32_t calls; };
+HleProfEntry g_hleProf[256];
+}
+static inline void HleProfAdd(const HLEFunction *info, uint64_t ticks) {
+	uint32_t h = (uint32_t)(((uintptr_t)info >> 3) * 2654435761u) >> 24;
+	for (int i = 0; i < 256; ++i) {
+		HleProfEntry &e = g_hleProf[(h + i) & 255];
+		if (e.func == info || e.func == nullptr) {
+			e.func = info;
+			e.ticks += ticks;
+			e.calls++;
+			return;
+		}
+	}
+}
+std::string HLEProfileText(double ticksPerMs, double frames) {
+	std::string out;
+	uint64_t total = 0;
+	for (auto &e : g_hleProf) total += e.ticks;
+	char buf[128];
+	snprintf(buf, sizeof(buf), "HLE calls %.1fms per frame", frames > 0 ? total / ticksPerMs / frames : 0.0);
+	out = buf;
+	for (int n = 0; n < 6; ++n) {
+		int best = -1;
+		for (int i = 0; i < 256; ++i)
+			if (g_hleProf[i].func && g_hleProf[i].ticks && (best < 0 || g_hleProf[i].ticks > g_hleProf[best].ticks)) best = i;
+		if (best < 0) break;
+		HleProfEntry &e = g_hleProf[best];
+		snprintf(buf, sizeof(buf), "%s %s %.2fms/%u", n == 0 ? ":" : ",", e.func->name ? e.func->name : "?", e.ticks / ticksPerMs / (frames > 0 ? frames : 1.0), e.calls);
+		out += buf;
+		e.ticks = 0;
+	}
+	for (auto &e : g_hleProf) { e.ticks = 0; e.calls = 0; }
+	return out;
+}
+// For the stall report (PS3 Frontend 111): the calls since the last perf report, most frequent
+// first, without resetting (read from another thread; a torn count only garbles the text).
+std::string HLEProfilePeek() {
+	std::string out;
+	bool used[256] = {};
+	for (int n = 0; n < 12; ++n) {
+		int best = -1;
+		for (int i = 0; i < 256; ++i)
+			if (!used[i] && g_hleProf[i].func && g_hleProf[i].calls && (best < 0 || g_hleProf[i].calls > g_hleProf[best].calls)) best = i;
+		if (best < 0) break;
+		used[best] = true;
+		char buf[96];
+		snprintf(buf, sizeof(buf), "%s%s x%u", out.empty() ? "" : ", ", g_hleProf[best].func->name ? g_hleProf[best].func->name : "?", g_hleProf[best].calls);
+		out += buf;
+	}
+	return out.empty() ? "none" : out;
+}
+#define HLE_PROF_BEGIN() const uint64_t hleProfStart = PS3Profile::Now(); PS3Profile::hleRunning = info->name
+// The JIT profile charges a block the time to the next block entry: an HLE call's time (the GE's
+// display lists in sceGeListEnQueue, mostly) is taken out, so the profile shows the game's own code.
+#define HLE_PROF_END(info) do { const uint64_t hleProfTicks = PS3Profile::Now() - hleProfStart; HleProfAdd(info, hleProfTicks); \
+	if (PS3Profile::jitBlockProfile) PS3Profile::jitProfState.lastTb += hleProfTicks; PS3Profile::hleRunning = nullptr; } while (0)
+#else
+#define HLE_PROF_BEGIN()
+#define HLE_PROF_END(info)
+#endif
+
 static void CallSyscallWithFlags(MIPSState *mips, const HLEFunction *info) {
 	// _dbg_assert_(g_stackSize == 0);
 	g_stackSize = 0;
@@ -1080,6 +1157,7 @@ static void CallSyscallWithFlags(MIPSState *mips, const HLEFunction *info) {
 		g_stackSize = 1;
 	}
 	g_syscallPC = mips->pc;
+	HLE_PROF_BEGIN();
 
 	const u32 flags = info->flags;
 
@@ -1097,6 +1175,7 @@ static void CallSyscallWithFlags(MIPSState *mips, const HLEFunction *info) {
 	} else {
 		info->func(mips);
 	}
+	HLE_PROF_END(info);
 
 	// Now, g_stackSize should be back to 0. Enable this for "pedantic mode", will find a lot of problems.
 	// Check g_stack[0] in the debugger.
@@ -1121,7 +1200,9 @@ static void CallSyscallWithoutFlags(MIPSState *mips, const HLEFunction *info) {
 	}
 	g_syscallPC = mips->pc;
 
+	HLE_PROF_BEGIN();
 	info->func(mips);
+	HLE_PROF_END(info);
 
 	// Now, g_stackSize should be back to 0. Enable this for "pedantic mode", will find a lot of problems.
 	// Check g_stack[0] in the debugger.

@@ -17,6 +17,11 @@
 #include "Common/Net/SocketCompat.h"
 #include "Common/Net/Resolve.h"
 
+#if defined(__PSL1GHT__)
+#include <net/net.h>
+#include <net/netctl.h>
+#endif
+
 #ifndef HTTPS_NOT_AVAILABLE
 #include "Common/Net/HTTPNaettRequest.h"
 #include "ext/naett-lib/naett.h"
@@ -36,8 +41,24 @@ extern JavaVM *gJvm;
 namespace net {
 
 static bool g_wsaInitialized;
+#if defined(__PSL1GHT__)
+static bool g_netInitialized;
+static bool g_netCtlInitialized;
+#endif
 
 void Init() {
+#if defined(__PSL1GHT__)
+	if (!g_netInitialized) {
+		int result = netInitialize();
+		g_netInitialized = result == 0;
+		if (!g_netInitialized) {
+			ERROR_LOG(Log::Net, "PS3 network initialization failed: %d", result);
+		}
+	}
+	if (g_netInitialized && !g_netCtlInitialized) {
+		g_netCtlInitialized = netCtlInit() == 0;
+	}
+#endif
 #ifdef _WIN32
 	// WSA does its own internal reference counting, no need to keep track of if we inited or not.
 	WSADATA wsaData{};
@@ -72,6 +93,16 @@ bool HTTPSAvailable() {
 }
 
 void Shutdown() {
+#if defined(__PSL1GHT__)
+	if (g_netCtlInitialized) {
+		netCtlTerm();
+		g_netCtlInitialized = false;
+	}
+	if (g_netInitialized) {
+		netDeinitialize();
+		g_netInitialized = false;
+	}
+#endif
 #ifndef HTTPS_NOT_AVAILABLE
 	http::HTTPSShutdown();
 #endif
@@ -82,6 +113,7 @@ void Shutdown() {
 #endif
 }
 
+#if !defined(__PSL1GHT__)
 bool HostPortExists(const std::string &host, int port, int timeout_ms) {
 	if (host.empty() || (port <= 0 || port > 65535) || timeout_ms < 0) return false;
 
@@ -397,6 +429,8 @@ bool GetLocalIP4List(std::vector<std::string> &IP4s) {
 #endif
 	return false;
 }
+
+#endif  // !defined(__PSL1GHT__), implemented in ResolvePS3.cpp
 
 static int HexDigitValue(char c) {
 	if (c >= '0' && c <= '9') {
@@ -775,6 +809,9 @@ bool DirectDNSLookupIPV4(const char *dns_server_ip, const char *domain, uint32_t
 #endif
 
 	struct sockaddr_in server_addr{};
+#if defined(__PSL1GHT__)
+	server_addr.sin_len = sizeof(server_addr);
+#endif
 	server_addr.sin_family = AF_INET;
 	server_addr.sin_port = htons(DNS_PORT);
 

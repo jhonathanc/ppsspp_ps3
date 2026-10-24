@@ -11,6 +11,13 @@ void Register_sceLibFttt();
 // there and has nothing to fall back on - so it can only replace our HLE when they're present.
 bool NandFontsComplete();
 
+// PS3 "PSP fonts" setting: true lets the fonts be unpacked from the disc's firmware updater and the
+// disc's own libfont.prx run with them, as desktop PPSSPP does. False (default) keeps the HLE
+// sceFont with the bundled fonts and never unpacks anything (as before build 167).
+extern bool g_fontsFromDisc;
+// Unpacks the firmware's fonts from the mounted disc's updater into flash0:/font. True if any.
+bool InstallFontsFromDiscUpdater();
+
 void __FontInit();
 void __FontShutdown();
 void __FontDoState(PointerWrap &p);

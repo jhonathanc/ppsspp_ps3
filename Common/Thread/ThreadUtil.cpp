@@ -57,7 +57,11 @@ void RegisterAttachDetach(AttachDetachFunc attach, AttachDetachFunc detach) {
 #include <pthread.h>
 #include <sys/types.h>
 #include <unistd.h>
+#if PPSSPP_PLATFORM(PS3)
+#include "PS3/SDK/PS3SDK.h"
+#else
 #include <sys/syscall.h>
+#endif
 #endif
 
 #if defined(__DragonFly__) || defined(__FreeBSD__) || defined(__OpenBSD__)
@@ -149,6 +153,10 @@ void SetCurrentThreadName(const char *threadName) {
 	pthread_setname_np(pthread_self(), "%s", (void*)threadName);
 #endif
 
+#if PPSSPP_PLATFORM(PS3)
+	PS3SDKSetCurrentThreadName(threadName);
+#endif
+
 	// Set the locally known threadname using a thread local variable.
 #ifdef TLS_SUPPORTED
 	curThreadName = threadName;
@@ -237,6 +245,8 @@ int GetCurrentThreadIdForDebug() {
 	return _lwp_self();
 #elif defined(__OpenBSD__)
 	return getthrid();
+#elif PPSSPP_PLATFORM(PS3)
+	return static_cast<int>(PS3SDKCurrentThreadId());
 #else
 	return 1;
 #endif

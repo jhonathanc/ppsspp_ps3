@@ -28,7 +28,7 @@
 
 #if PPSSPP_PLATFORM(WINDOWS)
 #include "Common/CommonWindows.h"
-#else
+#elif !PPSSPP_PLATFORM(PS3)
 #include <csignal>
 #include <cstdlib>
 #include <cxxabi.h>

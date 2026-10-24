@@ -5,6 +5,16 @@
 #include <vector>
 
 #include "Common/CommonTypes.h"
+#include "ppsspp_config.h"
+#include "Core/MIPS/MIPSAsm.h"
+
+#if PPSSPP_PLATFORM(PS3)
+bool MipsAssembleOpcode(std::string_view line, DebugInterface *cpu, u32 address, std::string *error) {
+	if (error)
+		*error = "Debugger assembly is unavailable on PS3";
+	return false;
+}
+#else
 #include "ext/armips/Core/Assembler.h"
 #include "ext/armips/Core/FileManager.h"
 #include "Core/Debugger/SymbolMap.h"
@@ -78,3 +88,4 @@ bool MipsAssembleOpcode(std::string_view line, DebugInterface *cpu, u32 address,
 
 	return true;
 }
+#endif

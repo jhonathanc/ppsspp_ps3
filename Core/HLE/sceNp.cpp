@@ -125,7 +125,7 @@ bool NpAuthProcessEvents() {
 		return false;
 	}
 
-	auto& args = npAuthEvents.front();
+	auto args = npAuthEvents.front();
 	auto& id = args.data[0];
 	auto& result = args.data[1];
 	auto& argAddr = args.data[2];
@@ -260,9 +260,9 @@ static int sceNpGetMyLanguages(u32 langListPtr)
 	if (!langList.IsValid())
 		return hleLogError(Log::sceNet, SCE_NP_ERROR_INVALID_ARGUMENT, "invalid arg");
 
-	INFO_LOG(Log::sceNet, "%s - Language1 Code: %d", __FUNCTION__, npMyLangList.language1);
-	INFO_LOG(Log::sceNet, "%s - Language2 Code: %d", __FUNCTION__, npMyLangList.language2);
-	INFO_LOG(Log::sceNet, "%s - Language3 Code: %d", __FUNCTION__, npMyLangList.language3);
+	INFO_LOG(Log::sceNet, "%s - Language1 Code: %d", __FUNCTION__, (int)npMyLangList.language1);
+	INFO_LOG(Log::sceNet, "%s - Language2 Code: %d", __FUNCTION__, (int)npMyLangList.language2);
+	INFO_LOG(Log::sceNet, "%s - Language3 Code: %d", __FUNCTION__, (int)npMyLangList.language3);
 
 	*langList = npMyLangList;
 	langList.NotifyWrite("NpGetMyLanguages");
@@ -362,11 +362,11 @@ int sceNpAuthCreateStartRequest(u32 paramAddr) {
 
 	npServiceId = Memory::GetCharPointer(params.serviceIdAddr);
 
-	INFO_LOG(Log::sceNet, "%s - Max Version: %u.%u", __FUNCTION__, params.version.major, params.version.minor);
+	INFO_LOG(Log::sceNet, "%s - Max Version: %u.%u", __FUNCTION__, (unsigned int)params.version.major, (unsigned int)params.version.minor);
 	INFO_LOG(Log::sceNet, "%s - Service ID: %s", __FUNCTION__, Memory::GetCharPointer(params.serviceIdAddr));
 	INFO_LOG(Log::sceNet, "%s - Entitlement ID: %s", __FUNCTION__, Memory::GetCharPointer(params.entitlementIdAddr));
-	INFO_LOG(Log::sceNet, "%s - Consumed Count: %d", __FUNCTION__, params.consumedCount);
-	INFO_LOG(Log::sceNet, "%s - Cookie (size = %d): %s", __FUNCTION__, params.cookieSize, Memory::GetCharPointer(params.cookieAddr));
+	INFO_LOG(Log::sceNet, "%s - Consumed Count: %d", __FUNCTION__, (int)params.consumedCount);
+	INFO_LOG(Log::sceNet, "%s - Cookie (size = %d): %s", __FUNCTION__, (int)params.cookieSize, Memory::GetCharPointer(params.cookieAddr));
 
 	u32 retval = 0;
 	if (params.size >= 32 && params.ticketCbAddr != 0) {
@@ -403,7 +403,7 @@ int sceNpAuthCreateStartRequest(u32 paramAddr) {
 		// 2nd Arg seems to be used if not a negative number and exits the handler if it's negative (error code?)
 		// 3rd Arg seems to be a data (ie. 92 bytes of data?) pointer and tested for null within callback handler (optional callback args?)
 		u32 ticketLength = 248; // default ticket length? should be updated using the ticket length returned from login
-		notifyNpAuthHandlers(retval, ticketLength, (params.size >= 36) ? params.cbArgAddr : 0);
+		notifyNpAuthHandlers(retval, ticketLength, (params.size >= 36) ? static_cast<u32>(params.cbArgAddr) : 0);
 	}
 
 	//hleDelayResult(0, "give time", 500000);

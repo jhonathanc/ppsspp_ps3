@@ -206,10 +206,10 @@ bool ReplayExecuteFile(const Path &filename) {
 		}
 
 		if (fh.version < REPLAY_VERSION_MIN) {
-			ERROR_LOG(Log::System, "Replay version %d unsupported", fh.version);
+			ERROR_LOG(Log::System, "Replay version %d unsupported", (int)fh.version);
 			return false;
 		} else if (fh.version > REPLAY_VERSION_CURRENT) {
-			WARN_LOG(Log::System, "Replay version %d scary and futuristic, trying anyway", fh.version);
+			WARN_LOG(Log::System, "Replay version %d scary and futuristic, trying anyway", (int)fh.version);
 		}
 
 		RtcSetBaseTime((int32_t)fh.rtcBaseSeconds, 0);

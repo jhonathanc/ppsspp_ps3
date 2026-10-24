@@ -1374,7 +1374,7 @@ inline Vec4<float> Vec4<float>::FromRGBA(unsigned int rgba)
 template<typename T>
 inline Vec4<T> Vec4<T>::FromRGBA(const u8 *rgba)
 {
-	return Vec4<T>::FromRGBA(*(unsigned int *)rgba);
+	return Vec4<T>::FromRGBA((u32)rgba[0] | ((u32)rgba[1] << 8) | ((u32)rgba[2] << 16) | ((u32)rgba[3] << 24));
 }
 
 template<>
@@ -1436,7 +1436,9 @@ __forceinline unsigned int Vec4<int>::ToRGBA() const
 template<typename T>
 __forceinline void Vec4<T>::ToRGBA(u8 *rgba) const
 {
-	*(u32 *)rgba = ToRGBA();
+	const u32 color = ToRGBA();
+	for (int i = 0; i < 4; ++i)
+		rgba[i] = (u8)(color >> (8 * i));
 }
 
 #if defined(_M_SSE)
