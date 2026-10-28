@@ -85,7 +85,7 @@ bool g_irNaNWatchVfpu = false;
 bool g_irNaNWatchInf = false;
 void (*g_irNaNWatchLog)(u32 blockStart, u32 blockBytes, int reg, u32 before, u32 after, const u32 *fpuBefore) = nullptr;
 
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 // Host test hook: PPSSPP_NANWATCH=1 turns it on with output to stderr.
 static void HostNaNWatchLog(u32 blockStart, u32 blockBytes, int reg, u32 before, u32 after, const u32 *) {
 	fprintf(stderr, "NANWATCH block %08x (%u) reg %d %08x -> %08x\n", blockStart, blockBytes / 4, reg, before, after);

@@ -560,7 +560,7 @@ static void GEDrawLogLine(const char *fmt, ...) {
 	// The last line asked for: write out what's left.
 	if (g_geDrawLogLeft.load(std::memory_order_relaxed) <= 0)
 		FlushDrawLog();
-#else
+#elif !defined(__LIBRETRO__)
 	fprintf(stderr, "%s\n", text);
 #endif
 }
@@ -984,7 +984,7 @@ void SoftGPU::FastRunLoop(DisplayList &list) {
 		}
 		const auto &info = cmdInfo[cmd];
 		const u32 diff = op ^ gstate.cmdmem[cmd];
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 		{
 			static const bool clog = getenv("PPSSPP_CMDLOG") != nullptr;
 			static int lines;
@@ -1087,7 +1087,7 @@ void SoftGPU::Execute_BlockTransferStart(u32 op, u32 diff) {
 	const uint32_t srcSize = (height - 1) * (srcStride + width) * bpp;
 	const uint32_t dst = dstBasePtr + (dstY * dstStride + dstX) * bpp;
 	const uint32_t dstSize = (height - 1) * (dstStride + width) * bpp;
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 	static const bool xferLog = getenv("PPSSPP_XFERLOG") != nullptr;
 	if (xferLog)
 		fprintf(stderr, "XFER %08x -> %08x %dx%d bpp %d\n", src, dst, width, height, bpp);
@@ -1365,7 +1365,7 @@ void SoftGPU::Execute_Prim(u32 op, u32 diff) {
 #if PPSSPP_ARCH(POWERPC)
 	PS3Profile::gePrims++;
 #endif
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 	{
 		// Test builds: PPSSPP_PRIMSTATE=1 prints the matrix state each draw sees (to compare builds).
 		static const bool primState = getenv("PPSSPP_PRIMSTATE") != nullptr;
@@ -1458,7 +1458,7 @@ void SoftGPU::Execute_Prim(u32 op, u32 diff) {
 			GEDrawLogLine("  size %d coloff %d raw %s", size, dec->coloff, raw.c_str());
 		}
 	}
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 	// PPSSPP_DRAWVERTS=1 (with PPSSPP_DRAWLOG): the first vertices of through-mode draws, decoded.
 	static const bool drawVerts = getenv("PPSSPP_DRAWVERTS") != nullptr;
 	if (drawLog && drawVerts && gstate.isModeThrough() && !indices) {

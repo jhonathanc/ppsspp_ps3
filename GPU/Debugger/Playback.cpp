@@ -986,7 +986,7 @@ void DumpExecute::Framebuf(int level, u32 ptr, u32 sz, bool needed) {
 	u32 pspSize = sz - headerSize;
 	const bool isTarget = (framebuf->flags & 1) != 0;
 	const bool unchangedVRAM = version_ >= 6 && (framebuf->flags & 2) != 0;
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 	{
 		static const bool vtexLog = getenv("PPSSPP_VTEXLOG") != nullptr;  // Test builds: VRAM texture data in the dump.
 		if (vtexLog) {
@@ -1172,7 +1172,7 @@ ReplayResult DumpExecute::Run() {
 				++i;
 			continue;
 		}
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 		static const bool cmdLog = getenv("PPSSPP_DUMPCMDLOG") != nullptr;
 		if (cmdLog && cmd.type != CommandType::REGISTERS && cmd.type != CommandType::VERTICES && cmd.type != CommandType::INDICES) {
 			u32 first = 0;
@@ -1268,7 +1268,7 @@ ReplayResult DumpExecute::Run() {
 #ifdef PPSSPP_RSX_HOSTSIM
 	::HostSimRSXFrame();
 #endif
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 	// Test builds: PPSSPP_REPLAY_BENCH=N times N passes over the dump, then exits.
 	static const int benchPasses = getenv("PPSSPP_REPLAY_BENCH") ? atoi(getenv("PPSSPP_REPLAY_BENCH")) : 0;
 	if (benchPasses > 0) {

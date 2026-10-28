@@ -29,6 +29,8 @@ public:
 	~LibretroGraphicsContext() override { ShutdownAPI(); }
 
 	virtual void SetRenderTarget() {}
+	virtual void PrepareState(bool) {}
+	virtual void ShutdownCore() {}
 	virtual GPUCore GetGPUCore() = 0;
 	virtual const char *Ident() = 0;
 

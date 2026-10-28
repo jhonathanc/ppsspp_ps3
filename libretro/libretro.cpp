@@ -1605,6 +1605,7 @@ void retro_unload_game(void) {
    }
 
 	Libretro::FinishPendingBoot();
+	if (ctx) ctx->ShutdownCore();
 	// A failed boot has already shut down.
 	if (PollBootState() != BootState::Off)
 		PSP_Shutdown(true);
@@ -1623,6 +1624,7 @@ void retro_reset(void) {
       Libretro::EmuThreadStop();
 
    Libretro::FinishPendingBoot();
+   if (ctx) ctx->ShutdownCore();
    if (PollBootState() != BootState::Off)
       PSP_Shutdown(true);
 
@@ -1832,6 +1834,7 @@ bool retro_serialize(void *data, size_t size) {
       EmuThreadPause(); // Does nothing if already paused
    }
 
+   ctx->PrepareState(false);
    SaveState::SaveStart state;
    // The buffer was sized by an earlier retro_serialize_size(); the state
    // may have grown since, so never write past 'size'.
@@ -1866,6 +1869,7 @@ bool retro_unserialize(const void *data, size_t size) {
    if (useEmuThread)
       EmuThreadPause(); // Does nothing if already paused
 
+   ctx->PrepareState(true);
    std::string errorString;
    SaveState::SaveStart state;
    bool retVal = CChunkFileReader::LoadPtr((u8 *)data, size, state, &errorString)

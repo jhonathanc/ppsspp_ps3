@@ -16,6 +16,19 @@ if(WIN32)
 		LibretroD3D11Context.cpp)
 endif()
 
+if(PS3_PSL1GHT)
+	option(PPSSPP_LIBRETRO_RSX "Use the shared RetroArch RSX renderer" ON)
+	if(PPSSPP_LIBRETRO_RSX)
+		list(APPEND LIBRETRO_SRCS
+			../PS3/libretro/LibretroRSXContext.cpp
+			../PS3/rsx/RSXCore.cpp
+			../PS3/rsx/RSXRenderer.cpp
+			../PS3/rsx/RSXSelfTest.cpp
+			../PS3/rsx/TexSpu.cpp
+			../PS3/frontend/TransferFix.cpp)
+	endif()
+endif()
+
 set(LIBRETRO_VFS_SOURCE libretro-common/vfs/vfs_implementation.c)
 if(PS3_PSL1GHT)
 	find_package(Python3 REQUIRED COMPONENTS Interpreter)
@@ -57,6 +70,9 @@ if(ANDROID)
 	set_target_properties(ppsspp_libretro PROPERTIES SUFFIX "_android.so")
 endif()
 target_include_directories(ppsspp_libretro PRIVATE libretro-common/include)
+if(PS3_PSL1GHT AND PPSSPP_LIBRETRO_RSX)
+	target_compile_definitions(ppsspp_libretro PRIVATE PPSSPP_PS3_LIBRETRO_RSX)
+endif()
 
 if(NOT MSVC AND NOT PS3)
    if (APPLE OR IOS)

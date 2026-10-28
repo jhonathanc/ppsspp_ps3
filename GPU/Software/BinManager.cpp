@@ -328,7 +328,7 @@ void BinManager::UpdateState() {
 			if (states_.Full())
 				Flush("states");
 			stateIndex_ = (uint16_t)states_.Push(next);
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 			// PPSSPP_PATCHCHECK: compare with the state computed again.
 			static const bool check = getenv("PPSSPP_PATCHCHECK") != nullptr;
 			if (check) {

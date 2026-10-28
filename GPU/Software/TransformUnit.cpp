@@ -1499,7 +1499,7 @@ void TransformUnit::SubmitPrimitive(const void* vertices, const void* indices, G
 	PS3Profile::geCpuPrims++;
 	PS3Profile::Scope cpuPathTimer(PS3Profile::geCpuPath);
 #endif
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 	struct CpuPathLog {
 		std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
 		int prim, count; u32 vtype;

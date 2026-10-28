@@ -25,6 +25,10 @@ static constexpr uint32_t IO_RING_SIZE = 6 * 1024 * 1024;
 static constexpr uint32_t IO_REGION_SIZE = 8 * 1024 * 1024 + IO_RING_SIZE;
 
 bool Ready();
+// Borrow a frontend context and its unused mapped memory. The frontend retains ownership.
+bool AttachContext(_gcmCtxData *context, void *io, uint32_t ioSize, uint32_t ioUsed);
+void ReleaseContext();
+void InvalidateState();
 // Diagnostics: the current step is logged before it runs. A watchdog thread reports a step that
 // takes over 3 seconds together with the GPU's command pointers and our fence labels, and an RSX
 // exception handler logs the error code, so a freeze leaves its location in launch.log.

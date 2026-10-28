@@ -193,6 +193,7 @@ void SetScissor(int x, int y, int w, int h) { Emit(3, (uint32_t)(x | (w << 16)),
 void ClearTarget(uint32_t argb, bool, bool, uint32_t v) { Emit(6, argb, v); }
 void SetDefaultState() { Emit(40, 0x40); }
 void ResetDrawState() {}
+void InvalidateState() {}
 
 Vertex *AllocVertices(int count, uint32_t *firstIndex) {
 	*firstIndex = g_vertRing;

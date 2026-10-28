@@ -30,6 +30,7 @@ static uint8_t *g_io = nullptr;           // Start of our I/O-mapped region.
 static uint32_t g_ioUsed = 0;             // Bump pointer (bytes from g_io).
 static uint32_t g_ioMark = 0;
 static uint32_t g_ioFirstFree = 0;
+static uint32_t g_ioLimit = IO_REGION_SIZE - IO_RING_SIZE;
 
 // Labels 64..255 are for applications; keep away from the ones samples commonly use (255).
 static constexpr u8 LABEL_FENCE = 200;
@@ -102,6 +103,7 @@ static s32 CommandBufferCallback(gcmContextData *ctx, u32 count) {
 
 }  // namespace RSX
 
+#ifndef PPSSPP_PS3_LIBRETRO_RSX
 // SDL's PSL1GHT driver calls rsxInit with a 64 KB command buffer inside a 1 MB I/O region. A
 // renderer needs a bigger command buffer, plus main memory the RSX can read (vertex staging,
 // readback). Swap in our own parameters; SDL keeps working the same way on top of it.
@@ -142,7 +144,21 @@ extern "C" s32 __wrap_rsxInit(gcmContextData **context, u32 cmdSize, u32 ioSize,
 	return result;
 }
 
+#endif
+
 namespace RSX {
+
+bool AttachContext(_gcmCtxData *context, void *io, uint32_t ioSize, uint32_t ioUsed) {
+	if (!context || !io || ioUsed >= ioSize || ioSize - ioUsed < 4 * 1024 * 1024)
+		return false;
+	g_context = context;
+	g_io = (uint8_t *)io;
+	g_ioLimit = ioSize;
+	g_ioFirstFree = ioUsed;
+	g_ioUsed = g_ioMark = ioUsed;
+	SetVertexRingInMain(false);
+	return true;
+}
 
 static volatile const char *g_step = "idle";
 static volatile double g_stepStart = 0.0;
@@ -280,7 +296,7 @@ uint32_t LocalOffset(const void *ptr) {
 void *IoAlloc(uint32_t size, uint32_t align) {
 	if (!g_io) return nullptr;
 	uint32_t start = (g_ioUsed + align - 1) & ~(align - 1);
-	if (start + size > IO_REGION_SIZE - IO_RING_SIZE) return nullptr;
+	if (start > g_ioLimit || size > g_ioLimit - start) return nullptr;
 	g_ioUsed = start + size;
 	return g_io + start;
 }
@@ -742,6 +758,35 @@ void ResetDrawState() {
 		rsxInvalidateVertexCache(g_context);
 		rsxInvalidateTextureCache(g_context, GCM_INVALIDATE_TEXTURE);
 	}
+}
+
+void InvalidateState() {
+	g_boundFragment = -1;
+	g_ringBound = false;
+	g_tlRingBound = false;
+	if (g_context) {
+		rsxInvalidateVertexCache(g_context);
+		rsxInvalidateTextureCache(g_context, GCM_INVALIDATE_TEXTURE);
+	}
+}
+
+void ReleaseContext() {
+	if (!g_context) return;
+	Finish();
+	if (g_ring && g_ringLocation == GCM_LOCATION_RSX)
+		LocalFree(g_ring);
+	g_ring = nullptr;
+	g_ringPos = g_ringSegment = 0;
+	for (uint32_t &f : g_ringFence)
+		f = 0;
+	for (int i = 0; i < RSX_FRAGMENT_PROGRAM_COUNT; ++i) {
+		LocalFree(g_fpPtr[i]);
+		g_fpPtr[i] = nullptr;
+	}
+	g_programsLoaded = false;
+	InvalidateState();
+	g_context = nullptr;
+	g_io = nullptr;
 }
 
 void EndFrame() {

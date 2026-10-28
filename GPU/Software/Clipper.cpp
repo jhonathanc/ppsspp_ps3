@@ -292,7 +292,7 @@ void ProcessTriangle(const ClipVertexData &v0, const ClipVertexData &v1, const C
 		mask |= CalcClipMask(v0.clippos);
 		mask |= CalcClipMask(v1.clippos);
 		mask |= CalcClipMask(v2.clippos);
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 		static const bool clipLog = getenv("PPSSPP_CLIPLOG") != nullptr;
 		if (clipLog)
 			fprintf(stderr, "CLIP tri z/w %g %g %g w %g %g %g depthClip %d mask %d screenz %d %d %d\n", v0.clippos.z / v0.clippos.w, v1.clippos.z / v1.clippos.w, v2.clippos.z / v2.clippos.w,

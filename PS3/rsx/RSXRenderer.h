@@ -18,6 +18,7 @@
 class RSXRenderer;
 
 struct RSXRendererOptions {
+	bool ownDisplay = true;    // False when a frontend presents the exported texture.
 	int scale = 1;              // Internal resolution multiplier, 1..3.
 	bool syncEveryFrame = true; // Write rendered framebuffers back to PSP VRAM every frame.
 	bool bilinear = true;       // Output scaling filter.
@@ -49,6 +50,15 @@ struct RSXRendererOptions {
 	// it is read as a texture or shown (Silent Hill Origins' loading screen showed only its top part).
 	bool cpuRows = false;
 };
+
+struct RSXRendererFrame {
+	uint32_t offset;
+	uint32_t pitch;
+	uint32_t width;
+	uint32_t height;
+};
+bool RSXRendererGetFrame(RSXRenderer *renderer, RSXRendererFrame *frame);
+void RSXRendererBeginFrame(RSXRenderer *renderer);
 
 // Null if the RSX could not be set up (the reason is in launch.log).
 RSXRenderer *RSXRendererCreate(const RSXRendererOptions &options);

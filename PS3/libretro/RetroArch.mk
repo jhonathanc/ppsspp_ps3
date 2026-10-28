@@ -12,8 +12,8 @@ include Makefile.psl1ght
 
 CFLAGS += -I$(PPSSPP_ROOT)/PS3/runtime/include -I$(PPSSPP_PS3_RUNTIME)/include
 CFLAGS += -ffunction-sections -fdata-sections
-CFLAGS += -DPPSSPP_PS3_RSX_HOST_SIZE=8388608
 LDFLAGS += -L$(PPSSPP_PS3_RUNTIME)/lib -Wl,--gc-sections
+LDFLAGS += -Wl,--wrap=rsxSetTransferScaleSurface
 LIBDIRS += -L$(PSL1GHT)/ppu/lib
 LIBS := -Wl,--start-group $(CORE_LIBRARY) $(filter-out -lretro_psl1ght,$(LIBS)) -lstdc++ -lpthread -Wl,--end-group
 

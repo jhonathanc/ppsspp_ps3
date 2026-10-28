@@ -432,7 +432,7 @@ int GPUCommon::EstimateFillCycles(GEPrimitiveType prim, const void *verts, const
 	// Measured at the default clocks; the GE speeds up with the rest of the system.
 	const int cycles = (int)((float)usToCycles(PowerScaleFromDefaultClock(1000)) * ns / 1000000.0f);
 	s_listFill += cycles;
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 	if (getenv("PPSSPP_FILLLOG"))
 		fprintf(stderr, "FILL tex %08x fmt %d count %d: %.2f ms (%d cycles)\n", gstate.getTextureAddress(0), (int)gstate.getTextureFormat(), count, ns / 1000000.0f, cycles);
 #endif
@@ -1305,7 +1305,7 @@ DLResult GPUCommon::RunDLQueue(bool allowAsync) {
 			}
 		}
 		if (asyncThread_) {
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 			static const bool asyncLog = getenv("PPSSPP_GE_ASYNC_LOG") != nullptr;
 			static int asyncRuns = 0;
 			++asyncRuns;
@@ -1507,7 +1507,7 @@ DLResult GPUCommon::ProcessDLQueueBody() {
 	drawCompleteTicks = startingTicks + cyclesExecuted;
 	busyTicks = std::max(busyTicks, drawCompleteTicks);
 	RecordListRun(cyclesExecuted);
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 	if (getenv("PPSSPP_LISTCYCLES"))
 		fprintf(stderr, "LISTS done: %d cycles (%.2f ms)\n", cyclesExecuted, cyclesToUs(cyclesExecuted) / 1000.0);
 #endif
@@ -2983,7 +2983,7 @@ void GPUCommon::DoBlockTransfer(u32 skipDrawReason) {
 	// TODO: Correct timing appears to be 1.9, but erring a bit low since some of our other timing is inaccurate.
 	cyclesExecuted += ((height * width * bpp) * 16) / 10;
 	s_listTransfer += ((height * width * bpp) * 16) / 10;
-#if !PPSSPP_PLATFORM(PS3)
+#if !PPSSPP_PLATFORM(PS3) && !defined(__LIBRETRO__)
 	if (getenv("PPSSPP_LISTCYCLES"))
 		fprintf(stderr, "TRANSFER %dx%d bpp %d: %d cycles\n", width, height, bpp, ((height * width * bpp) * 16) / 10);
 #endif

@@ -1,5 +1,8 @@
 
 #include "libretro/LibretroGraphicsContext.h"
+#ifdef PPSSPP_PS3_LIBRETRO_RSX
+#include "PS3/libretro/LibretroRSXContext.h"
+#endif
 #if PPSSPP_API(ANY_GL)
 #include "libretro/LibretroGLContext.h"
 #include "libretro/LibretroGLCoreContext.h"
@@ -97,6 +100,15 @@ void LibretroGraphicsContext::LostBackbuffer() { draw_->HandleEvent(Draw::Event:
 
 LibretroGraphicsContext *LibretroGraphicsContext::CreateGraphicsContext() {
 	LibretroGraphicsContext *ctx;
+#ifdef PPSSPP_PS3_LIBRETRO_RSX
+	if (Libretro::backend != RETRO_HW_CONTEXT_NONE) {
+		ctx = new LibretroRSXContext();
+		std::string rsxError;
+		if (ctx->InitAPI(nullptr, nullptr, &rsxError))
+			return ctx;
+		delete ctx;
+	}
+#endif
 
 	retro_hw_context_type preferred;
 	if (!Libretro::environ_cb(RETRO_ENVIRONMENT_GET_PREFERRED_HW_RENDER, &preferred))

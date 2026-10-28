@@ -31,7 +31,6 @@
 #include "GPU/Math3D.h"
 #include "GPU/Software/FuncId.h"
 #include "GPU/Software/Rasterizer.h"
-#include "GPU/Software/RasterizerRegCache.h"
 #include "GPU/Software/Sampler.h"
 #include "GPU/Software/TransformUnit.h"
 
@@ -256,6 +255,8 @@ public:
 	explicit RSXRenderer(const RSXRendererOptions &o) : opt_(o) {}
 	bool Init();
 	void Shutdown();
+	bool GetFrame(RSXRendererFrame *frame);
+	void BeginFrame();
 
 	void Triangle(const RasterizerState &state, const VertexData &v0, const VertexData &v1, const VertexData &v2) override;
 	void Rect(const RasterizerState &state, const VertexData &v0, const VertexData &v1, bool clear) override;
@@ -288,6 +289,8 @@ public:
 
 private:
 	bool EnsureTarget();
+	Surface *DisplaySurface(uint32_t *x, uint32_t *y);
+	void FinishFrame();
 	Surface *FindSurface(uint32_t addr, uint16_t stride, GEBufferFormat fmt, int rows, bool create, bool forDrawing = false);
 	DepthSurface *FindDepth(uint32_t addr, uint16_t minW, uint16_t minH);
 	void Upload(Surface &s);
@@ -524,7 +527,7 @@ bool RSXRenderer::Init() {
 		PS3Frontend::Trace("RSX renderer: no RSX context");
 		return false;
 	}
-	if (!RSX::LoadPrograms() || !RSX::InitDisplay()) return false;
+	if (!RSX::LoadPrograms() || (opt_.ownDisplay && !RSX::InitDisplay())) return false;
 	RSX::Step("renderer: calibration");
 	cal_ = RSXCalibrate();
 	RSX::StepQuiet("idle");
@@ -557,7 +560,7 @@ bool RSXRenderer::Init() {
 		return false;
 	}
 	batch_.reserve(MAX_BATCH + 8);
-	ComputeGameRect();
+	if (opt_.ownDisplay) ComputeGameRect();
 	RSX::Finish();
 	PS3Frontend::Trace("RSX renderer ready: %dx internal resolution, VRAM sync %s, output %dx%d at %d,%d",
 		scale_, opt_.syncEveryFrame ? "every frame" : "minimal", gameW_, gameH_, gameX_, gameY_);
@@ -567,11 +570,15 @@ bool RSXRenderer::Init() {
 void RSXRenderer::Shutdown() {
 	FlushBatch();
 	if (opt_.syncEveryFrame) DownloadAll();
-	RSX::ResetDisplay();
+	if (opt_.ownDisplay) RSX::ResetDisplay();
+	else RSX::Finish();
 	ProcessDeferredFrees(true);
 	for (auto &s : surfaces_) { RSX::UnbindTileRegion(s->tile); RSX::LocalFree(s->mem); }
 	for (auto &d : depths_) { RSX::UnbindTileRegion(d->tile); RSX::LocalFree(d->mem); }
 	for (auto &t : textures_) RSX::LocalFree(t.second.mem);
+	RSX::LocalFree(depalMem_);
+	RSX::LocalFree(fxaaMem_);
+	RSX::LocalFree(rttCopy_);
 	surfaces_.clear();
 	rttCopySrc_ = nullptr;
 	depths_.clear();
@@ -1876,12 +1883,8 @@ bool RSXRenderer::LookupTexture(const RasterizerState &state, TexEntry **out) {
 
 	// (Re)decode with the software sampler's own fetch function: every PSP format, swizzle and
 	// CLUT mode comes out exactly as the software renderer would read it.
-	Sampler::FetchFunc fetch = Sampler::GetFetchFunc(id, nullptr);
-	if (!fetch) {
-		Sampler::FlushJit();
-		fetch = Sampler::GetFetchFunc(id, nullptr);
-		if (!fetch) return false;
-	}
+	Sampler::FetchFunc fetch = Sampler::GetFetchFunc(id);
+	if (!fetch) return false;
 	TbScope td(tbDecode_);
 	const uint32_t pitch = ((uint32_t)w * 4 + 63) & ~63u;
 	void *mem = AllocLocal(pitch * h);
@@ -3349,9 +3352,7 @@ void RSXRenderer::DrawOverlay(const std::string &text, int x, int y) {
 		RSX::Mem::Local, RSX::BackBufferOffset(), RSX::DisplayPitch(), x, y, w, h, false);
 }
 
-void RSXRenderer::Present(const std::string &overlay) {
-	RSX::StepQuiet("renderer: present");
-	FlushBatch();
+Surface *RSXRenderer::DisplaySurface(uint32_t *x, uint32_t *y) {
 	PSPPointer<u8> topaddr;
 	u32 linesize = 512;
 	GEBufferFormat fmt = GE_FORMAT_565;
@@ -3405,6 +3406,42 @@ void RSXRenderer::Present(const std::string &overlay) {
 		s->lastFrame = frame_;
 	}
 
+	*x = srcX;
+	*y = srcY;
+	return s;
+}
+
+void RSXRenderer::BeginFrame() {
+	tlConstValid_ = false;
+	targetValid_ = false;
+	stateValid_ = false;
+	vpTL_ = false;
+	tlCull_ = 0;
+	RSX::InvalidateState();
+	RSX::SetDefaultState();
+	RSX::BindVertexProgram();
+}
+
+bool RSXRenderer::GetFrame(RSXRendererFrame *frame) {
+	FlushBatch();
+	uint32_t x = 0, y = 0;
+	Surface *s = DisplaySurface(&x, &y);
+	if (s) {
+		RSX::GpuWaitForRendering();
+		frame->offset = s->offset + y * scale_ * s->pitch + x * scale_ * 4;
+		frame->pitch = s->pitch;
+		frame->width = std::min(PSP_W, (int)s->stride - (int)x) * scale_;
+		frame->height = PSP_H * scale_;
+	}
+	FinishFrame();
+	return s != nullptr;
+}
+
+void RSXRenderer::Present(const std::string &overlay) {
+	RSX::StepQuiet("renderer: present");
+	FlushBatch();
+	uint32_t srcX = 0, srcY = 0;
+	Surface *s = DisplaySurface(&srcX, &srcY);
 	RSX::GpuWaitForRendering();
 	// The back buffer is on screen until the previous frame's flip; the RSX waits for it here,
 	// after the frame's drawing, not before.
@@ -3444,6 +3481,10 @@ void RSXRenderer::Present(const std::string &overlay) {
 	DrawOverlay(overlay, gameX_ + 8, gameY_ + 6);
 	RSX::StepQuiet("renderer: flip");
 	RSX::Present();
+	FinishFrame();
+}
+
+void RSXRenderer::FinishFrame() {
 	RSX::EndFrame();
 
 	if (opt_.syncEveryFrame) DownloadAll();
@@ -3544,6 +3585,14 @@ void RSXRendererDestroy(RSXRenderer *renderer) {
 	if (!renderer) return;
 	renderer->Shutdown();
 	delete renderer;
+}
+
+bool RSXRendererGetFrame(RSXRenderer *renderer, RSXRendererFrame *frame) {
+	return renderer && renderer->GetFrame(frame);
+}
+
+void RSXRendererBeginFrame(RSXRenderer *renderer) {
+	if (renderer) renderer->BeginFrame();
 }
 
 void RSXRendererPresent(RSXRenderer *renderer, const std::string &overlay) {

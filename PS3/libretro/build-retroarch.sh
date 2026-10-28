@@ -13,12 +13,11 @@ if [[ $output == "$retroarch" || $output == "$repo" ]]; then
 fi
 cmake --build "$core_build" --target ps3_libretro_archive --parallel "${JOBS:-6}"
 mkdir -p "$output/source" "$output/obj"
-# Copy current tracked sources, including local edits, without old build artifacts.
-git -C "$retroarch" ls-files -z | tar -C "$retroarch" --null -T - -cf - | tar -C "$output/source" -xf -
+# Copy current sources, including local additions, without build artifacts.
+git -C "$retroarch" ls-files -z --cached --others --exclude-standard -- . ":(exclude)artifacts" | tar -C "$retroarch" --null -T - -cf - | tar -C "$output/source" -xf -
 python3 "$repo/PS3/prepare-libretro-vfs.py" \
 	"$output/source/libretro-common/vfs/vfs_implementation.c" \
 	"$output/source/libretro-common/vfs/vfs_implementation.c"
-python3 "$repo/PS3/libretro/prepare-retroarch.py" "$output/source"
 touch "$output/source/griffin/griffin.c"
 make -C "$output/source" -f "$repo/PS3/libretro/RetroArch.mk" \
 	-j"${JOBS:-6}" OUT="$output" PPSSPP_ROOT="$repo" \
