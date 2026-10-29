@@ -1,9 +1,5 @@
 #pragma once
 
-#if defined(__PSL1GHT__) && defined(__PS3_SONY_SDK__)
-#error "Select one PS3 SDK: PSL1GHT or Sony"
-#endif
-
 // This file is included by C, C++ and ASM files
 // So do not output any token!
 

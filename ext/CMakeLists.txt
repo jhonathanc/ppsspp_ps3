@@ -84,7 +84,7 @@ if(WIN32)
 	)
 endif()
 
-if(LINUX OR ANDROID OR MACOSX OR IOS OR BSD OR PS3_SONY_SDK)
+if(LINUX OR ANDROID OR MACOSX OR IOS OR BSD)
 	list(APPEND aemu_postoffice_client_obj
 		aemu_postoffice/client/sock_impl_linux.c
 	)

@@ -54,5 +54,4 @@ ranges and software-driver regressions on Linux and Windows. It has no PPSSPP
 dependency.
 
 Only PSL1GHT selects these sources. Other platforms retain their graphics
-contexts. The Sony SDK adapter remains separate; its installed GCC 4.1.1 cannot
-compile this C++17 core.
+contexts.

@@ -6,21 +6,14 @@ parent, so applying it directly replaces the tree and loses the submodules.
 This integration keeps the official submodule entries and the current CPU/GPU
 interfaces, including JitBlockTable, AddressSpace and the block shadow.
 
-## SDK selection
+## PS3 SDK
 
-| Target | Preprocessor definitions | CMake selection |
-| --- | --- | --- |
-| PSL1GHT | `__PS3__`, `__PSL1GHT__` | `PS3=ON`, `PS3_PSL1GHT=ON` (set by psl1ght.cmake) |
-| Sony | `__PS3__`, `__PS3_SONY_SDK__` | `PS3=ON`, `PS3_SONY_SDK=ON` with a compatible toolchain |
+The PS3 port uses PSL1GHT. `PS3/psl1ght.cmake` sets `PS3=ON` and
+`PS3_PSL1GHT=ON`, defining `__PS3__` and `__PSL1GHT__` for the core.
 
-The two SDK definitions are mutually exclusive. Memory reservations, page commits,
-clocks and thread identification use PS3/SDK/PS3SDK.h; each SDK has a separate C
-implementation. C keeps SDK headers separate from the C++17 core.
-
-The PPC JIT, RSX bridge and SPU workers currently target PSL1GHT. The Sony adapter
-provides the common memory/time/thread primitives; it is not a complete Sony SDK
-build. The locally installed Sony GCC 4.1.1 rejects C++17. A suitable C++17
-compiler/runtime and Sony graphics/audio/network integration are still required.
+Memory reservations, page commits, clocks and thread identification use
+`PS3/SDK/PS3SDK.h`, implemented by `PS3/SDK/PSL1GHT.c`. The C adapter
+keeps SDK headers separate from the C++17 core.
 
 The RSX transform and lighting code, GE worker and SAS kernel bridge live under PS3/, with
 conditional includes in the shared sources. Default desktop builds use the
