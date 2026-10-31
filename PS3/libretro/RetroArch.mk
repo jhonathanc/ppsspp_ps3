@@ -1,5 +1,6 @@
 OUT ?= /tmp/ppsspp-retroarch
 OBJDIR ?= $(OUT)/obj
+RSX_HOST_SIZE ?= 8388608
 
 override OBJ = $(OUT)/obj/modern_opaque.vpo.o $(OUT)/obj/modern_opaque.fpo.o
 override OBJ += $(OUT)/obj/modern_alpha_blend.vpo.o $(OUT)/obj/modern_alpha_blend.fpo.o

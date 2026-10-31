@@ -418,11 +418,13 @@ const IRInst *PPCJitBackend::BlockInstructions(int block_num) const {
 }
 
 bool PPCJitBackend::StoreBlockIR(int block_num, const IRInst *instructions, int count) {
-	if (irArena_.size() + count > g_irPs3ArenaLimit) {
+	const size_t required = irArena_.size() + count;
+	if (required > g_irPs3ArenaLimit) {
 		return false;
 	}
-	if (irArena_.capacity() < g_irPs3ArenaLimit) {
-		irArena_.reserve(g_irPs3ArenaLimit);
+	if (required > irArena_.capacity()) {
+		const size_t growth = std::max<size_t>(64 * 1024, irArena_.capacity() * 2);
+		irArena_.reserve(std::min<size_t>(g_irPs3ArenaLimit, std::max(required, growth)));
 	}
 	if (block_num >= (int)blockIR_.size()) {
 		blockIR_.resize(block_num + 1);
